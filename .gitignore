@@ -1,0 +1,17 @@
+# Environment secrets - never commit real keys/passwords
+.env
+.env.local
+*.env
+!*.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Supabase local CLI state (machine-specific link/session info)
+supabase/.branches/
+supabase/.temp/
+
+# OS
+.DS_Store
+Thumbs.db
