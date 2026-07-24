@@ -199,3 +199,36 @@ The database schema and seed data are complete. On the next work session, start 
   * Resident cannot submit a transaction for a house they are not assigned to; can submit one for their own assigned, open billing period.
   * All 6 checks passed. The one test transaction row created by the script was deleted afterward via the service-role client to keep seed data clean.
 * Actions 3 and 4 from the original resume plan are now complete and verified against the real hosted project. Next: Action 5, the transaction submission slice (already partially exercised by the test script, but not yet a real endpoint) — or begin mobile app scaffolding.
+
+### Two-Machine Workflow: Work Laptop (Agent) + Personal Laptop (Full Access), Personal Git (2026-07-24, continued)
+
+* **Arrangement:** development happens on the work laptop with agent support; code is shared via the personal git remote below; testing that needs full/unrestricted network access (e.g. `supabase link` / `supabase db push` via the CLI) happens on the personal laptop.
+* **Identity isolation:** the work laptop's *global* git config is the enterprise identity (`c-Amit-Jain_genesys` / `c.Amit.Jain@genesys.com`) and was left untouched. This repository has a **repo-local** override (`git config user.name` / `user.email`, no `--global`) set to the personal identity (`jainamit6987` / `amit.jain6987@gmail.com`); commits from this repo are authored under the personal identity only.
+* **Remote:** `origin` = `https://github.com/jainamit6987/rosewoodpay.git` (HTTPS, not SSH — SSH's port 22 is expected to be blocked by the same network restriction that blocked direct Postgres connections earlier in this session; HTTPS/443 is the transport confirmed to work).
+* Added a root-level `.gitignore` (secrets, `node_modules/`, Supabase local CLI state) in addition to `backend/.gitignore`.
+* Initial commit `81e8b4d` pushed to `main`: progress log/spec, Supabase schema/migrations/seed, and the backend scaffold (auth, `/me`, RLS test script). `backend/.env` was correctly excluded.
+* **Action items for the personal laptop (not yet done):**
+  1. Clone the repo, `npm install` inside `backend/` (dependencies are not tracked by git).
+  2. Recreate `backend/.env` manually (git-ignored by design) using the same Supabase project URL/keys used on the work laptop.
+  3. Run `supabase link --project-ref hzjnbunuinewbeaxzxhh` (full network access should make this and `db push` work directly, unlike on the work laptop).
+  4. Run `supabase migration repair` to mark the three existing migrations as already-applied before ever running `supabase db push`, since they were applied manually via the SQL Editor and are not yet in the CLI's migration-history table.
+  5. Set its own repo-local git identity the same way, if the personal laptop's global git config differs (unlikely, but worth checking with `git config user.email`).
+* **Discipline going forward:** `git pull` before starting work on either machine, `git commit` + `git push` before switching machines, to avoid divergent history between the two.
+
+### Action 5: Transaction Submission Endpoint (2026-07-24, continued)
+
+* Added `POST /transactions` (`backend/src/routes/transactions.js`), authenticated via the existing middleware, using the caller's RLS-scoped client for the actual insert:
+  * Validates `house_id`, `billing_period_id`, and a positive numeric `amount` are present; requires at least one of `utr_number`, `raw_shared_payload`, or `proof_file_path`.
+  * Derives `society_id` server-side from the house record (never trusted from the request body).
+  * Always sets `submitted_by` from the authenticated caller (`req.user.id`), never from the request body - this applies to admin-recorded cash payments too, so the audit trail reflects who actually entered the record.
+  * Leaves `processing_status` at its database default (`Submitted`) - no code path here ever marks a submission `Verified`.
+  * Maps Postgres error codes to specific HTTP responses: unique-violation (duplicate UTR) to 409, foreign-key violation to 400, RLS/insufficient-privilege to 403, instead of a generic 500.
+* Added `backend/scripts/test-transactions.js`, exercising the endpoint over real HTTP (not direct Supabase calls), matching the spec's Action 5 completion check exactly:
+  * Unauthenticated request rejected (401).
+  * Missing required fields rejected (400); missing all of UTR/payload/proof rejected (400).
+  * Resident submitting for a house they are not assigned to rejected (403).
+  * Resident submitting for their own assigned, open billing period succeeds (201, `processing_status: "Submitted"`).
+  * Resubmitting the same UTR rejected (409).
+  * Admin recording a cash payment on behalf of another house succeeds (201).
+  * All 7 checks passed against the real hosted project; test rows cleaned up afterward, ledger confirmed back to 0 transactions.
+* Action 5 from the original resume plan is complete and verified. Backend Actions 1-5 are now all done. Next: scaffold the `mobile/` app (Expo/React Native), which is the structural piece still missing from the repo - `backend/` and `supabase/` exist, `mobile/` does not yet.
