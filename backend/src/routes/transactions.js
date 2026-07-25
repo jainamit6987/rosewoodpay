@@ -281,6 +281,51 @@ router.post('/', authenticate, async (req, res) => {
   res.status(201).json({ ...transaction, allocations: insertedAllocations });
 });
 
+// Admin/Committee dashboard feed: every Submitted transaction across every
+// society the caller administers or sits on the committee of, oldest-first
+// (review the longest-waiting submissions first). This is what actually
+// makes /:id/verify and /:id/reject usable in practice - without it, an
+// admin would have no way to discover which transactions need action short
+// of already knowing a specific house's id and calling
+// GET /houses/:houseId/transactions one house at a time. Committee members
+// can see this list (same visibility they already have on individual
+// transactions) even though only an Admin can act on any given item.
+router.get('/pending', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+
+  const { data: memberships, error: membershipError } = await supabase
+    .from('society_members')
+    .select('society_id')
+    .eq('auth_user_id', req.user.id)
+    .or('is_admin.eq.true,is_committee_member.eq.true');
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+
+  const societyIds = [...new Set((memberships || []).map((m) => m.society_id))];
+  if (societyIds.length === 0) {
+    return res.status(403).json({
+      error: 'Only an Admin or Committee member can view pending transactions.',
+    });
+  }
+
+  const { data: pending, error: pendingError } = await supabase
+    .from('transactions')
+    .select(
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+    )
+    .in('society_id', societyIds)
+    .eq('processing_status', 'Submitted')
+    .order('created_at', { ascending: true });
+
+  if (pendingError) {
+    return res.status(500).json({ error: pendingError.message });
+  }
+
+  res.json(pending);
+});
+
 // Confirms the caller is an Admin of the transaction's own society - not
 // just "an Admin somewhere". Returns the transaction row (via the caller's
 // RLS-scoped client, so a non-member gets the same "not found" outcome as a
@@ -305,7 +350,7 @@ async function loadTransactionAndCheckAdmin(supabase, userId, transactionId) {
     .select('id')
     .eq('society_id', transaction.society_id)
     .eq('auth_user_id', userId)
-    .eq('role', 'Admin')
+    .eq('is_admin', true)
     .maybeSingle();
 
   if (adminError) {

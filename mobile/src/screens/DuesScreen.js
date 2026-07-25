@@ -98,21 +98,14 @@ export default function DuesScreen({ onPayHouse, onLogout }) {
     );
   }
 
-  if (membership.role !== 'Resident') {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.title}>{membership.society?.name}</Text>
-        <Text style={styles.subtitle}>
-          Signed in as {membership.role}. The admin/committee view is not built yet in this app -
-          use the Supabase Studio Table Editor or Postman for now.
-        </Text>
-        <TouchableOpacity style={styles.retryButton} onPress={onLogout}>
-          <Text style={styles.retryButtonText}>Sign out</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
+  // Personal dues are shown for ANY member with at least one house
+  // assignment - is_admin/is_committee_member are independent capability
+  // flags, not an exclusive alternative to being a resident (see
+  // backend/src/routes/me.js). This screen deliberately shows nothing
+  // about admin/committee capability at all: once a member has chosen to
+  // act as a Resident (see App.js's mode chooser), they see exactly what
+  // a plain resident sees, full stop - switching back to Admin/Committee
+  // is a log-out-and-choose-again action, not a shortcut sitting here.
   const housesWithDues = groupPeriodsByHouse(membership);
 
   const getSelectedCount = (houseId, periodCount) => {

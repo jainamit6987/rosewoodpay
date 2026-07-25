@@ -46,12 +46,14 @@ async function main() {
   check('resident CANNOT read billing period for a house they are not assigned to', otherBilling && otherBilling.length === 0);
 
   // --- Denied: resident reads other members' society_members rows ---
-  const { data: members } = await resident.from('society_members').select('id, role');
-  check('resident sees ONLY their own society_members row', members && members.length === 1 && members[0].role === 'Resident');
+  const { data: members } = await resident.from('society_members').select('id, is_admin');
+  check('resident sees ONLY their own society_members row', members && members.length === 1 && members[0].is_admin === false);
 
   // --- Allowed: admin reads all society_members rows ---
-  const { data: allMembers } = await admin.from('society_members').select('id, role');
-  check('admin sees ALL society_members rows in their society', allMembers && allMembers.length === 2);
+  // 5 total in this society as of the arrears/co-assignee/admin's-own-house
+  // fixtures: admin, resident, owner2, tenant, arrears.
+  const { data: allMembers } = await admin.from('society_members').select('id, is_admin');
+  check('admin sees ALL society_members rows in their society', allMembers && allMembers.length === 5);
 
   // --- Denied: resident submits a transaction for a house they are not assigned to ---
   const residentUserId = (await resident.auth.getUser()).data.user.id;

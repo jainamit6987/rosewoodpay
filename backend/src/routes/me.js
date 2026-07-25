@@ -16,7 +16,7 @@ router.get('/', authenticate, async (req, res) => {
   // endpoint *should* return.
   const { data: memberships, error: membershipError } = await supabase
     .from('society_members')
-    .select('id, society_id, role, is_committee_member, status, phone_number, societies(name, upi_vpa, upi_payee_name)')
+    .select('id, society_id, is_admin, is_committee_member, status, phone_number, societies(name, upi_vpa, upi_payee_name)')
     .eq('auth_user_id', req.user.id);
 
   if (membershipError) {
@@ -31,52 +31,58 @@ router.get('/', authenticate, async (req, res) => {
   for (const membership of memberships) {
     const entry = {
       society: membership.societies,
-      role: membership.role,
+      isAdmin: membership.is_admin,
       isCommitteeMember: membership.is_committee_member,
       status: membership.status,
       phoneNumber: membership.phone_number,
     };
 
-    if (membership.role === 'Resident') {
-      const { data: assignments, error: assignmentError } = await supabase
-        .from('resident_house_assignments')
-        .select('id, relationship_type, status, houses(id, house_number, type, status)')
-        .eq('society_member_id', membership.id)
-        .eq('status', 'Active');
+    // Personal dues are keyed off "does this member have any house
+    // assignment at all", never off is_admin/is_committee_member - the two
+    // are independent facts about the same person. A society secretary
+    // (is_admin=true) who also personally owns/occupies a house owes their
+    // own maintenance exactly like any other resident and must see it here;
+    // an Admin with no house of their own simply gets empty arrays below,
+    // same as always. This block now always runs.
+    const { data: assignments, error: assignmentError } = await supabase
+      .from('resident_house_assignments')
+      .select('id, relationship_type, status, houses(id, house_number, type, status)')
+      .eq('society_member_id', membership.id)
+      .eq('status', 'Active');
 
-      if (assignmentError) {
-        return res.status(500).json({ error: assignmentError.message });
-      }
-
-      const houseIds = assignments.map((a) => a.houses?.id).filter(Boolean);
-
-      let billingPeriods = [];
-      if (houseIds.length > 0) {
-        // Ordered oldest-first so this list always matches FIFO allocation
-        // order - the first row here is exactly the one POST /transactions
-        // will apply the resident's next payment to.
-        const { data: periods, error: periodsError } = await supabase
-          .from('billing_periods')
-          .select('id, house_id, period_month, amount_due, status')
-          .in('house_id', houseIds)
-          .eq('status', 'Open')
-          .order('period_month', { ascending: true });
-
-        if (periodsError) {
-          return res.status(500).json({ error: periodsError.message });
-        }
-        billingPeriods = periods;
-      }
-
-      entry.houseAssignments = assignments;
-      entry.openBillingPeriods = billingPeriods;
-      // Convenience total so the client doesn't need to sum client-side -
-      // this is the resident's full outstanding balance across all open
-      // periods on all their assigned houses, arrears included.
-      entry.totalOutstanding = billingPeriods.reduce((sum, period) => sum + Number(period.amount_due), 0);
+    if (assignmentError) {
+      return res.status(500).json({ error: assignmentError.message });
     }
 
-    if (membership.role === 'Admin' || membership.is_committee_member) {
+    const houseIds = assignments.map((a) => a.houses?.id).filter(Boolean);
+
+    let billingPeriods = [];
+    if (houseIds.length > 0) {
+      // Ordered oldest-first so this list always matches FIFO allocation
+      // order - the first row here is exactly the one POST /transactions
+      // will apply this member's next payment to.
+      const { data: periods, error: periodsError } = await supabase
+        .from('billing_periods')
+        .select('id, house_id, period_month, amount_due, status')
+        .in('house_id', houseIds)
+        .eq('status', 'Open')
+        .order('period_month', { ascending: true });
+
+      if (periodsError) {
+        return res.status(500).json({ error: periodsError.message });
+      }
+      billingPeriods = periods;
+    }
+
+    entry.houseAssignments = assignments;
+    entry.openBillingPeriods = billingPeriods;
+    // Convenience total so the client doesn't need to sum client-side -
+    // this member's full personal outstanding balance across all open
+    // periods on all their assigned houses, arrears included. Zero for a
+    // member with no house assignments at all (e.g. a pure Admin).
+    entry.totalOutstanding = billingPeriods.reduce((sum, period) => sum + Number(period.amount_due), 0);
+
+    if (membership.is_admin || membership.is_committee_member) {
       const { data: houses, error: housesError } = await supabase
         .from('houses')
         .select('id, house_number, type, owner_name, status')
@@ -86,7 +92,7 @@ router.get('/', authenticate, async (req, res) => {
         return res.status(500).json({ error: housesError.message });
       }
 
-      const { data: billingPeriods, error: periodsError } = await supabase
+      const { data: societyBillingPeriods, error: periodsError } = await supabase
         .from('billing_periods')
         .select('id, house_id, period_month, amount_due, status')
         .eq('society_id', membership.society_id);
@@ -96,7 +102,7 @@ router.get('/', authenticate, async (req, res) => {
       }
 
       entry.houses = houses;
-      entry.billingPeriods = billingPeriods;
+      entry.billingPeriods = societyBillingPeriods;
     }
 
     result.memberships.push(entry);

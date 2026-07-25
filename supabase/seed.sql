@@ -42,12 +42,17 @@ VALUES
 ('00000003-0000-0000-0000-000000000003', 'Orchid Meadows', 'orchidmeadows@upi', 'Orchid Meadows Welfare Association');
 
 -- 2. Create Society Members
-INSERT INTO public.society_members (id, society_id, auth_user_id, role, is_committee_member, status, phone_number)
+-- Note: is_admin/is_committee_member are independent capability flags, not
+-- an exclusive role - both false means a plain resident. admin@society.app
+-- is both an Admin AND, per the fixture added further below, a resident who
+-- owns and lives in their own house (D-404) - modeling a real self-managed
+-- society where the secretary/treasurer also pays their own maintenance.
+INSERT INTO public.society_members (id, society_id, auth_user_id, is_admin, is_committee_member, status, phone_number)
 VALUES
 -- Admin Member
-('00000004-0000-0000-0000-000000000004', '00000003-0000-0000-0000-000000000003', '00000001-0000-0000-0000-000000000001', 'Admin', true, 'Active', '+91 90000 00001'),
+('00000004-0000-0000-0000-000000000004', '00000003-0000-0000-0000-000000000003', '00000001-0000-0000-0000-000000000001', true, true, 'Active', '+91 90000 00001'),
 -- Resident Member
-('00000005-0000-0000-0000-000000000005', '00000003-0000-0000-0000-000000000003', '00000002-0000-0000-0000-000000000002', 'Resident', false, 'Active', '+91 90000 00002');
+('00000005-0000-0000-0000-000000000005', '00000003-0000-0000-0000-000000000003', '00000002-0000-0000-0000-000000000002', false, false, 'Active', '+91 90000 00002');
 
 
 --
@@ -98,6 +103,41 @@ VALUES
 
 
 --
+-- Admin's own residence
+--
+-- Models a self-managed society where the Admin (secretary/treasurer) also
+-- personally lives there and owes their own maintenance - is_admin and
+-- "has a resident_house_assignments row" are independent facts about the
+-- same person, not mutually exclusive. Used to verify GET /me returns
+-- personal dues for an Admin exactly like it would for any resident, and
+-- that the mobile app's post-login chooser (Resident view vs Admin
+-- dashboard) actually has something to choose between for this account.
+--
+
+-- 1. Create the Admin's own house
+INSERT INTO public.houses (id, society_id, house_number, type, owner_name, default_monthly_amount)
+VALUES
+('00000012-0000-0000-0000-000000000012', '00000003-0000-0000-0000-000000000003', 'D-404', 'Flat', 'Mr. Admin', 2200.00);
+
+-- 2. Assign the Admin to their own house
+INSERT INTO public.resident_house_assignments (society_member_id, house_id, status, relationship_type, approved_by, approved_at)
+VALUES
+('00000004-0000-0000-0000-000000000004', '00000012-0000-0000-0000-000000000012', 'Active', 'Owner', '00000001-0000-0000-0000-000000000001', now());
+
+-- 3. Open billing period for the Admin's own house for the current month
+INSERT INTO public.billing_periods (society_id, house_id, period_month, base_amount, amount_due, status)
+VALUES
+(
+    '00000003-0000-0000-0000-000000000003',
+    '00000012-0000-0000-0000-000000000012',
+    date_trunc('month', CURRENT_DATE),
+    2200.00,
+    2200.00,
+    'Open'
+);
+
+
+--
 -- Owner/Tenant co-assignee fixtures
 --
 -- Models: "Owner2" owns two houses - B-102, where they live themselves, and
@@ -127,10 +167,10 @@ VALUES
 ('00000009-0000-0000-0000-000000000099', '00000009-0000-0000-0000-000000000009', '{"sub":"00000009-0000-0000-0000-000000000009","email":"tenant@society.app"}', 'email', '1234567', now(), now(), now());
 
 -- 5. Add both as society members
-INSERT INTO public.society_members (id, society_id, auth_user_id, role, is_committee_member, status, phone_number)
+INSERT INTO public.society_members (id, society_id, auth_user_id, is_admin, is_committee_member, status, phone_number)
 VALUES
-('0000000a-0000-0000-0000-00000000000a', '00000003-0000-0000-0000-000000000003', '00000008-0000-0000-0000-000000000008', 'Resident', false, 'Active', '+91 90000 00008'),
-('0000000b-0000-0000-0000-00000000000b', '00000003-0000-0000-0000-000000000003', '00000009-0000-0000-0000-000000000009', 'Resident', false, 'Active', '+91 90000 00009');
+('0000000a-0000-0000-0000-00000000000a', '00000003-0000-0000-0000-000000000003', '00000008-0000-0000-0000-000000000008', false, false, 'Active', '+91 90000 00008'),
+('0000000b-0000-0000-0000-00000000000b', '00000003-0000-0000-0000-000000000003', '00000009-0000-0000-0000-000000000009', false, false, 'Active', '+91 90000 00009');
 
 -- 6. Create Owner2's own residence
 INSERT INTO public.houses (id, society_id, house_number, type, owner_name, default_monthly_amount)
@@ -207,9 +247,9 @@ VALUES
 ('0000000d-0000-0000-0000-0000000000dd', '0000000d-0000-0000-0000-00000000000d', '{"sub":"0000000d-0000-0000-0000-00000000000d","email":"arrears@society.app"}', 'email', '1234568', now(), now(), now());
 
 -- 11. Add as a society member
-INSERT INTO public.society_members (id, society_id, auth_user_id, role, is_committee_member, status, phone_number)
+INSERT INTO public.society_members (id, society_id, auth_user_id, is_admin, is_committee_member, status, phone_number)
 VALUES
-('0000000e-0000-0000-0000-00000000000e', '00000003-0000-0000-0000-000000000003', '0000000d-0000-0000-0000-00000000000d', 'Resident', false, 'Active', '+91 90000 00013');
+('0000000e-0000-0000-0000-00000000000e', '00000003-0000-0000-0000-000000000003', '0000000d-0000-0000-0000-00000000000d', false, false, 'Active', '+91 90000 00013');
 
 -- 12. Create their house
 INSERT INTO public.houses (id, society_id, house_number, type, owner_name, default_monthly_amount)

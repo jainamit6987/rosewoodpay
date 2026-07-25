@@ -13,7 +13,9 @@
 --   5. supabase/migrations/20260725010000_add_phone_number_to_society_members.sql
 --   6. supabase/migrations/20260725020000_add_transaction_allocations_and_default_rate.sql
 --   7. supabase/migrations/20260725030000_add_transaction_type_and_multiple_rule.sql
---   8. supabase/seed.sql
+--   8. supabase/migrations/20260725040000_add_audit_events_admin_insert_policy.sql
+--   9. supabase/migrations/20260726000000_replace_role_with_boolean_flags.sql
+--   10. supabase/seed.sql
 
 -- 1. Drop tables, children before parents (mirrors the FK graph across all
 --    migrations to date). IF EXISTS makes this safe to re-run.
