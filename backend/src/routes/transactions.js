@@ -281,4 +281,255 @@ router.post('/', authenticate, async (req, res) => {
   res.status(201).json({ ...transaction, allocations: insertedAllocations });
 });
 
+// Confirms the caller is an Admin of the transaction's own society - not
+// just "an Admin somewhere". Returns the transaction row (via the caller's
+// RLS-scoped client, so a non-member gets the same "not found" outcome as a
+// real 404) or null, plus a boolean for whether they're allowed to act on
+// it. Shared by both verify and reject below since the checks are identical.
+async function loadTransactionAndCheckAdmin(supabase, userId, transactionId) {
+  const { data: transaction, error: transactionError } = await supabase
+    .from('transactions')
+    .select('id, society_id, house_id, amount, utr_number, transaction_type, processing_status')
+    .eq('id', transactionId)
+    .maybeSingle();
+
+  if (transactionError) {
+    throw new Error(transactionError.message);
+  }
+  if (!transaction) {
+    return { transaction: null, isAdmin: false };
+  }
+
+  const { data: adminMembership, error: adminError } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('society_id', transaction.society_id)
+    .eq('auth_user_id', userId)
+    .eq('role', 'Admin')
+    .maybeSingle();
+
+  if (adminError) {
+    throw new Error(adminError.message);
+  }
+
+  return { transaction, isAdmin: !!adminMembership };
+}
+
+// After marking a transaction Verified, checks every billing period it has
+// an allocation against and closes any period whose *total* verified
+// allocations (across every transaction that has ever paid into it, not
+// just this one - a period can in principle be topped up by more than one
+// payment) now cover its amount_due. Left as "Open" if still short, so a
+// partial/underpayment does not incorrectly close a period.
+async function closeFullyPaidPeriods(supabase, billingPeriodIds) {
+  const closedPeriods = [];
+
+  for (const billingPeriodId of billingPeriodIds) {
+    const { data: period, error: periodError } = await supabase
+      .from('billing_periods')
+      .select('id, status, amount_due')
+      .eq('id', billingPeriodId)
+      .maybeSingle();
+
+    if (periodError) throw new Error(periodError.message);
+    if (!period || period.status !== 'Open') continue; // already Closed/Waived - nothing to do
+
+    const { data: allocations, error: allocationsError } = await supabase
+      .from('transaction_allocations')
+      .select('amount_allocated, transaction_id')
+      .eq('billing_period_id', billingPeriodId);
+
+    if (allocationsError) throw new Error(allocationsError.message);
+
+    const transactionIds = [...new Set((allocations || []).map((a) => a.transaction_id))];
+    if (transactionIds.length === 0) continue;
+
+    const { data: verifiedTransactions, error: verifiedError } = await supabase
+      .from('transactions')
+      .select('id')
+      .in('id', transactionIds)
+      .eq('processing_status', 'Verified');
+
+    if (verifiedError) throw new Error(verifiedError.message);
+
+    const verifiedIds = new Set((verifiedTransactions || []).map((t) => t.id));
+    const verifiedTotal = (allocations || [])
+      .filter((a) => verifiedIds.has(a.transaction_id))
+      .reduce((sum, a) => sum + Number(a.amount_allocated), 0);
+
+    if (verifiedTotal >= Number(period.amount_due)) {
+      const { error: closeError } = await supabase
+        .from('billing_periods')
+        .update({ status: 'Closed' })
+        .eq('id', billingPeriodId);
+
+      if (closeError) throw new Error(closeError.message);
+      closedPeriods.push(billingPeriodId);
+    }
+  }
+
+  return closedPeriods;
+}
+
+// Admin-only: confirms a submitted payment is real (matches a genuine bank
+// settlement, as far as the admin can tell from the UTR/receipt) and closes
+// any billing period it now fully covers. A screenshot or typed UTR is
+// evidence, not proof, of settlement - this is the one deliberate human
+// checkpoint the spec requires before a payment counts anywhere in the
+// resident-facing ledger (totalOutstanding, receipts, etc. all still only
+// reflect Open/Closed billing_periods state, unaffected by this alone -
+// closing the period is what actually changes what a resident owes).
+router.post('/:id/verify', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id } = req.params;
+
+  let transaction, isAdmin;
+  try {
+    ({ transaction, isAdmin } = await loadTransactionAndCheckAdmin(supabase, req.user.id, id));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transaction not found or not accessible.' });
+  }
+  if (!isAdmin) {
+    return res.status(403).json({ error: 'Only an Admin of this transaction\'s society can verify it.' });
+  }
+  if (transaction.processing_status !== 'Submitted') {
+    return res.status(409).json({
+      error: `This transaction is already "${transaction.processing_status}" and cannot be verified again.`,
+    });
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('transactions')
+    .update({
+      processing_status: 'Verified',
+      payment_status: 'Success',
+      verified_by: req.user.id,
+      verified_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  const { data: allocations, error: allocationsError } = await supabase
+    .from('transaction_allocations')
+    .select('billing_period_id')
+    .eq('transaction_id', id);
+
+  if (allocationsError) {
+    return res.status(500).json({ error: allocationsError.message });
+  }
+
+  let closedPeriods = [];
+  try {
+    closedPeriods = await closeFullyPaidPeriods(
+      supabase,
+      [...new Set((allocations || []).map((a) => a.billing_period_id))]
+    );
+  } catch (err) {
+    // Verification itself already succeeded and committed - surface the
+    // period-closing failure separately rather than implying the whole
+    // action failed and might need retrying (it does not).
+    return res.status(500).json({
+      error: `Transaction verified but closing paid-off periods failed: ${err.message}`,
+      transaction: updated,
+    });
+  }
+
+  const { error: auditError } = await supabase.from('audit_events').insert({
+    society_id: transaction.society_id,
+    actor_user_id: req.user.id,
+    entity_type: 'transaction',
+    entity_id: id,
+    action: 'Verified',
+    metadata: { amount: transaction.amount, utr_number: transaction.utr_number, closedPeriods },
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Transaction verified but the audit log entry failed: ${auditError.message}`,
+      transaction: updated,
+      closedPeriods,
+    });
+  }
+
+  res.json({ ...updated, closedPeriods });
+});
+
+// Admin-only: marks a submitted payment as not genuine (mismatched UTR,
+// duplicate claim, amount doesn't match the real bank transfer, etc). Never
+// touches billing_periods - a rejected transaction never counted toward any
+// period in the first place, so there is nothing to reverse. A reason is
+// required so the resident/committee has something concrete to act on,
+// unlike a silent disappearance from the ledger.
+router.post('/:id/reject', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id } = req.params;
+  const { reason } = req.body || {};
+
+  if (!reason || typeof reason !== 'string' || !reason.trim()) {
+    return res.status(400).json({ error: 'A non-empty reason is required to reject a transaction.' });
+  }
+
+  let transaction, isAdmin;
+  try {
+    ({ transaction, isAdmin } = await loadTransactionAndCheckAdmin(supabase, req.user.id, id));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transaction not found or not accessible.' });
+  }
+  if (!isAdmin) {
+    return res.status(403).json({ error: 'Only an Admin of this transaction\'s society can reject it.' });
+  }
+  if (transaction.processing_status !== 'Submitted') {
+    return res.status(409).json({
+      error: `This transaction is already "${transaction.processing_status}" and cannot be rejected.`,
+    });
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('transactions')
+    .update({
+      processing_status: 'Rejected',
+      payment_status: 'Failed',
+      verified_by: req.user.id,
+      verified_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  const { error: auditError } = await supabase.from('audit_events').insert({
+    society_id: transaction.society_id,
+    actor_user_id: req.user.id,
+    entity_type: 'transaction',
+    entity_id: id,
+    action: 'Rejected',
+    metadata: { amount: transaction.amount, utr_number: transaction.utr_number, reason: reason.trim() },
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Transaction rejected but the audit log entry failed: ${auditError.message}`,
+      transaction: updated,
+    });
+  }
+
+  res.json(updated);
+});
+
 module.exports = router;

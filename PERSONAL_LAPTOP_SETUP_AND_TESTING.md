@@ -265,15 +265,82 @@ delete from transactions where utr_number like 'MANUALTEST%';
 
 Done and verified (see `Society_App_Progress_Log.md` for full detail):
 `GET /health`, `POST /auth/login`, `POST /auth/logout`, `GET /me`,
-`POST /transactions`.
+`POST /transactions`, and a first resident-facing mobile app (`mobile/` -
+login, view dues, submit a payment; see Section 6).
 
-Not built yet: proof-file upload/storage handling, AI extraction queue,
-admin verification/rejection endpoints, ledger export, and the mobile app
-itself (`mobile/` does not exist in the repo yet).
+Not built yet: admin invite/create-member endpoint, transaction
+verify/reject workflow, proof-file upload/storage handling, AI extraction
+queue, most admin CRUD endpoints (society/members/houses/assignments/
+billing periods), and the admin side of the mobile app. See the "Backend
+API Coverage Review" entry in `Society_App_Progress_Log.md` for the full
+gap list and suggested build order.
 
 ## 5. Resuming Tomorrow
 
 Record whatever you find while testing (bugs, questions, blockers) in
 `Society_App_Progress_Log.md` under a new dated section, the same way every
-other session in this project has been logged. Next planned step after this
-testing pass: scaffold the `mobile/` Expo/React Native app.
+other session in this project has been logged.
+
+## 6. Mobile App (Resident MVP)
+
+`mobile/` is an Expo/React Native app (SDK 57, plain JavaScript, no
+TypeScript) covering three resident-facing screens: **Login**, **Dues**
+(assigned houses, open billing periods, total outstanding), and **Submit
+Payment** (enter an amount + UTR, with a "Pay via UPI" button that opens a
+`upi://pay` deep link first). No admin screens exist yet, and payment
+submission is manual-UTR-entry only - there is no OS share-sheet capture
+(`react-native-share-menu`) in this pass, since that requires a custom Expo
+dev client rather than plain Expo Go. There is also no React Navigation -
+with only 3 screens in a strictly linear flow, `App.js` just switches
+between them with plain React state, avoiding React Navigation 8.x's
+custom-dev-client requirement (it doesn't run in Expo Go) for a dependency
+this app doesn't need yet.
+
+### 6.1 Setup
+
+```bash
+cd mobile
+npm install
+cp .env.example .env
+```
+
+Edit `mobile/.env`:
+
+| Variable | Value |
+| :--- | :--- |
+| `EXPO_PUBLIC_SUPABASE_URL` | Same as `backend/.env`'s `SUPABASE_URL` |
+| `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Same as `backend/.env`'s `SUPABASE_ANON_KEY` |
+| `EXPO_PUBLIC_BACKEND_URL` | Your machine's **LAN IP**, not `localhost` - e.g. `http://192.168.1.23:4000`. A phone running Expo Go is a separate device on the network from wherever the backend runs, so `localhost` would point at the phone itself. Find your LAN IP with `ipconfig` (Windows) and confirm the backend is bound to `0.0.0.0` or your LAN interface, not just `127.0.0.1`. |
+
+Every variable **must** be prefixed `EXPO_PUBLIC_` to be readable at all -
+Expo only inlines that prefix into the app bundle - and none of them are
+secret once inlined (the anon key already isn't secret anywhere else in
+this project either). Restart the Expo dev server after editing `.env`;
+values are inlined at bundle time, not read live.
+
+### 6.2 Run it
+
+With the backend already running (Section 1.6) on the same network as your
+phone:
+
+```bash
+npx expo start
+```
+
+Scan the QR code with the **Expo Go** app (from the Play Store/App Store) on
+a phone on the same Wi-Fi network. Sign in with any of the seeded resident
+accounts from Section 2 (e.g. `resident@society.app` / `password`, or
+`arrears@society.app` / `password` to see several months of open dues at
+once).
+
+### 6.3 Known rough edges in this first pass
+
+* Sessions persist in plain `AsyncStorage`, not encrypted storage - fine for
+  this dev/testing phase, not for a real release (see the comment in
+  `mobile/src/config/supabaseClient.js`).
+* The "Pay via UPI" button opens the deep link without a `Linking.canOpenURL`
+  pre-check - that check is unreliable on Android 11+ without declaring the
+  `upi://` scheme via a config plugin (which needs a custom dev client). It
+  opens directly and shows an error only if no app can actually handle it.
+* Signed-in Admin/Committee accounts see a placeholder message instead of a
+  real screen - there is no admin UI yet.
