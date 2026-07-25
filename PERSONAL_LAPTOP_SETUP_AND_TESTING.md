@@ -85,7 +85,15 @@ supabase link --project-ref hzjnbunuinewbeaxzxhh
 supabase migration repair --status applied 20260724000000
 supabase migration repair --status applied 20260724100000
 supabase migration repair --status applied 20260724120000
+supabase migration repair --status applied 20260725000000
+supabase migration repair --status applied 20260725010000
+supabase migration repair --status applied 20260725020000
+supabase migration repair --status applied 20260725030000
 ```
+
+(Only mark a migration "applied" here if it has actually already been pasted
+into the SQL Editor - check `Society_App_Progress_Log.md` for which ones are
+still pending as of your last pull.)
 
 After that, any *new* migration files can be applied normally with:
 
@@ -125,6 +133,9 @@ Expect `{"status":"ok","database":"connected","societiesCount":1}`. If
 | :--- | :--- | :--- |
 | Admin (+ Committee) | `admin@society.app` | `password` |
 | Resident | `resident@society.app` | `password` |
+| Owner2 (owns B-102, lives there; also owns R-24, rents it out) | `owner2@society.app` | `password` |
+| Tenant (rents and pays for R-24) | `tenant@society.app` | `password` |
+| Arrears resident (owns C-303, 4 months behind, 1 already cleared) | `arrears@society.app` | `password` |
 
 Do not reuse these credentials anywhere outside this local dev project.
 
@@ -134,7 +145,9 @@ that runs it):
 | Item | ID |
 | :--- | :--- |
 | House A-101 (assigned to the resident) | `00000006-0000-0000-0000-000000000006` |
-| House R-24 (not assigned to the resident) | `00000007-0000-0000-0000-000000000007` |
+| House R-24 (owned by Owner2, rented out to Tenant) | `00000007-0000-0000-0000-000000000007` |
+| House B-102 (Owner2's own residence) | `0000000c-0000-0000-0000-00000000000c` |
+| House C-303 (Arrears resident's house, 4 back-months + current) | `0000000f-0000-0000-0000-00000000000f` |
 
 Billing period IDs are not fixed - look them up via the `/me` response (see
 below) or the Supabase Studio Table Editor.
@@ -172,12 +185,35 @@ roles side by side.
 
 - **Method/URL:** `GET {{base_url}}/me`
 - **Auth:** Type "Bearer Token", value `{{access_token}}`
-- Expect (as resident): your membership, `houseAssignments`, and
-  `openBillingPeriods` (grab a `billing_period_id` from here for the next
-  step). Expect (as admin): `houses` and `billingPeriods` for the whole
-  society instead.
+- Expect (as resident): your membership, `houseAssignments`, `openBillingPeriods`
+  (oldest-first), and `totalOutstanding` (sum of all open periods' `amount_due`
+  across every house you're assigned to). Expect (as admin): `houses` and
+  `billingPeriods` for the whole society instead.
 
 ### 3.4 Submit a transaction (`/transactions`)
+
+`billing_period_id` is **not** part of the request at all, and a single
+transaction is no longer limited to one billing period either. The server
+always resolves allocation itself: it walks the house's `Open` periods
+oldest-first, consuming each one's own `amount_due` from the submitted
+`amount`, and auto-generates further periods (using the house's
+`default_monthly_amount`) if the amount covers more than currently exist -
+covering a normal single-month payment, clearing several months of arrears
+in one lump payment, and paying ahead of schedule, all with the same logic.
+The response includes an `allocations` array showing exactly which
+period(s) got how much.
+
+`transaction_type` is an optional field, defaulting to `"Maintenance"` if
+omitted. For `"Maintenance"` (the only type any real flow uses today),
+`amount` **must be a whole-number multiple of the house's
+`default_monthly_amount`** - e.g. 2200 or 4400 are fine, 3300 (1.5x) is
+rejected outright with `400`, before any billing-period lookup happens.
+`"UtilityBill"`, `"Salary"`, and `"Other"` are reserved for a future
+admin-recorded society-expense feature and are exempt from that multiple
+rule entirely (any positive amount is accepted) - they still go through the
+same house-scoped billing-period allocation as Maintenance today, since no
+alternate insert path exists yet; that's a known gap to revisit once that
+feature is actually built.
 
 - **Method/URL:** `POST {{base_url}}/transactions`
 - **Auth:** Bearer Token, `{{access_token}}`
@@ -185,22 +221,35 @@ roles side by side.
 ```json
 {
   "house_id": "00000006-0000-0000-0000-000000000006",
-  "billing_period_id": "PASTE_FROM_/me_RESPONSE",
   "amount": 2200,
   "utr_number": "MANUALTEST0001"
 }
 ```
-- Expect `201` with `processing_status: "Submitted"`.
+- Expect `201` with `processing_status: "Submitted"`, `transaction_type:
+  "Maintenance"`, and an `allocations` array with exactly one entry.
+
+To see FIFO allocation pick an old month instead of the current one, log in
+as `arrears@society.app` / `password` and submit against house
+`0000000f-0000-0000-0000-00000000000f` (C-303) instead - that resident has
+3 back-months plus the current month still `Open` (one older month is
+already `Closed`), so the single allocation entry will point at a period
+3 months old, not the current month.
+
+To see one payment split across multiple periods, submit `amount: 4400`
+against C-303 instead of `2200` - expect two entries in `allocations`, one
+per period, each `amount_allocated: 2200`.
 
 ### 3.5 Try the rejection cases (each should fail on purpose)
 
 | Case | Change from 3.4 | Expected status |
 | :--- | :--- | :--- |
 | No auth header | Remove the Bearer token | `401` |
-| Missing fields | Remove `house_id` or `billing_period_id` | `400` |
+| Missing fields | Remove `house_id` | `400` |
 | No proof of any kind | Remove `utr_number` and don't add `raw_shared_payload`/`proof_file_path` | `400` |
 | Wrong house | Use house `00000007-0000-0000-0000-000000000007` (R-24) while logged in as the resident | `403` |
 | Duplicate UTR | Resubmit the exact same `utr_number` from a request that already succeeded | `409` |
+| Partial-month amount | `amount: 3300` (1.5x the base amount) against A-101 | `400` |
+| Unrecognized transaction_type | `"transaction_type": "NotARealType"` | `400` |
 
 ### 3.6 Clean up test transactions afterward
 

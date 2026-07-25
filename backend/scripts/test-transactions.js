@@ -43,34 +43,29 @@ async function post(path, token, body) {
   return { status: res.status, body: json };
 }
 
-async function billingPeriodFor(houseId) {
-  const { data } = await supabaseAdmin.from('billing_periods').select('id').eq('house_id', houseId).single();
-  return data.id;
-}
-
 async function main() {
   const residentToken = await loginToken('resident@society.app', 'password');
   const adminToken = await loginToken('admin@society.app', 'password');
-  const a101Period = await billingPeriodFor(HOUSE_A101);
-  const r24Period = await billingPeriodFor(HOUSE_R24);
   const testUtr = `TEST${Date.now()}`;
 
-  const noAuth = await post('/transactions', null, { house_id: HOUSE_A101, billing_period_id: a101Period, amount: 2200 });
+  // billing_period_id is no longer part of the request - the server always
+  // resolves it itself (FIFO: oldest Open period for the house). See
+  // scripts/test-arrears-fifo.js for a case that actually exercises that
+  // resolution against a house with multiple open periods.
+  const noAuth = await post('/transactions', null, { house_id: HOUSE_A101, amount: 2200 });
   check('unauthenticated request is rejected (401)', noAuth.status === 401, noAuth);
 
   const missingFields = await post('/transactions', residentToken, { amount: 2200 });
-  check('missing house_id/billing_period_id is rejected (400)', missingFields.status === 400, missingFields);
+  check('missing house_id is rejected (400)', missingFields.status === 400, missingFields);
 
   const missingProof = await post('/transactions', residentToken, {
     house_id: HOUSE_A101,
-    billing_period_id: a101Period,
     amount: 2200,
   });
   check('missing utr/proof/payload is rejected (400)', missingProof.status === 400, missingProof);
 
   const wrongHouse = await post('/transactions', residentToken, {
     house_id: HOUSE_R24,
-    billing_period_id: r24Period,
     amount: 2500,
     utr_number: `${testUtr}WRONGHOUSE`,
   });
@@ -78,19 +73,20 @@ async function main() {
 
   const valid = await post('/transactions', residentToken, {
     house_id: HOUSE_A101,
-    billing_period_id: a101Period,
     amount: 2200,
     utr_number: testUtr,
   });
   check(
-    'resident submitting for their own house + open billing period succeeds (201, status Submitted)',
-    valid.status === 201 && valid.body.processing_status === 'Submitted',
+    'resident submitting for their own house succeeds (201, status Submitted, auto-resolved allocation)',
+    valid.status === 201 &&
+      valid.body.processing_status === 'Submitted' &&
+      Array.isArray(valid.body.allocations) &&
+      valid.body.allocations.length === 1,
     valid
   );
 
   const duplicate = await post('/transactions', residentToken, {
     house_id: HOUSE_A101,
-    billing_period_id: a101Period,
     amount: 2200,
     utr_number: testUtr,
   });
@@ -98,7 +94,6 @@ async function main() {
 
   const adminOnBehalf = await post('/transactions', adminToken, {
     house_id: HOUSE_R24,
-    billing_period_id: r24Period,
     amount: 2500,
     utr_number: `${testUtr}CASH`,
   });
@@ -110,6 +105,7 @@ async function main() {
 
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
+  // Cascades to transaction_allocations automatically (ON DELETE CASCADE).
   await supabaseAdmin.from('transactions').delete().like('utr_number', 'TEST%');
 
   process.exit(failCount > 0 ? 1 : 0);

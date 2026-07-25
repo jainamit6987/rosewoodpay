@@ -3,10 +3,10 @@
 // is doing anything. Run with: node scripts/test-rls.js
 require('dotenv').config();
 const { supabaseAnon, createUserScopedClient } = require('../src/config/supabaseClient');
+const supabaseAdmin = require('../src/config/supabaseAdmin');
 
 const HOUSE_A101 = '00000006-0000-0000-0000-000000000006'; // resident's assigned house
 const HOUSE_R24 = '00000007-0000-0000-0000-000000000007'; // not assigned to the resident
-const BILLING_PERIOD_R24 = null; // resolved at runtime
 
 let passCount = 0;
 let failCount = 0;
@@ -54,40 +54,62 @@ async function main() {
   check('admin sees ALL society_members rows in their society', allMembers && allMembers.length === 2);
 
   // --- Denied: resident submits a transaction for a house they are not assigned to ---
-  const { data: r24Period } = await admin
-    .from('billing_periods')
-    .select('id')
-    .eq('house_id', HOUSE_R24)
-    .single();
+  const residentUserId = (await resident.auth.getUser()).data.user.id;
 
   const { error: insertOtherHouseError } = await resident.from('transactions').insert({
     society_id: (await admin.from('houses').select('society_id').eq('id', HOUSE_R24).single()).data.society_id,
     house_id: HOUSE_R24,
-    billing_period_id: r24Period.id,
-    submitted_by: (await resident.auth.getUser()).data.user.id,
+    submitted_by: residentUserId,
     amount: 2500,
     utr_number: 'TEST000000R24',
   });
   check('resident CANNOT submit a transaction for a house they are not assigned to', !!insertOtherHouseError);
 
-  // --- Allowed: resident submits a transaction for their own assigned, open billing period ---
+  // --- Allowed: resident submits a transaction for their own assigned house ---
+  const { data: insertedOwnTxn, error: insertOwnHouseError } = await resident
+    .from('transactions')
+    .insert({
+      society_id: (await admin.from('houses').select('society_id').eq('id', HOUSE_A101).single()).data.society_id,
+      house_id: HOUSE_A101,
+      submitted_by: residentUserId,
+      amount: 2200,
+      utr_number: `TEST${Date.now()}`,
+    })
+    .select()
+    .single();
+  check('resident CAN submit a transaction for their own assigned house', !insertOwnHouseError);
+
+  // --- Allocation-level RLS: billing_period_id validity now lives on
+  //     transaction_allocations, not on transactions itself. ---
   const { data: a101Period } = await admin
     .from('billing_periods')
-    .select('id, house_id')
+    .select('id')
     .eq('house_id', HOUSE_A101)
     .single();
+  const { data: r24Period } = await admin.from('billing_periods').select('id').eq('house_id', HOUSE_R24).single();
 
-  const { error: insertOwnHouseError } = await resident.from('transactions').insert({
-    society_id: (await admin.from('houses').select('society_id').eq('id', HOUSE_A101).single()).data.society_id,
-    house_id: HOUSE_A101,
+  const { error: allocateOwnHouseError } = await resident.from('transaction_allocations').insert({
+    transaction_id: insertedOwnTxn.id,
     billing_period_id: a101Period.id,
-    submitted_by: (await resident.auth.getUser()).data.user.id,
-    amount: 2200,
-    utr_number: `TEST${Date.now()}`,
+    amount_allocated: 2200,
   });
-  check('resident CAN submit a transaction for their own assigned, open billing period', !insertOwnHouseError);
+  check('resident CAN allocate their own transaction to a period on their own assigned house', !allocateOwnHouseError);
+
+  const { error: allocateOtherHouseError } = await resident.from('transaction_allocations').insert({
+    transaction_id: insertedOwnTxn.id,
+    billing_period_id: r24Period.id,
+    amount_allocated: 2500,
+  });
+  check(
+    'resident CANNOT allocate their own transaction to a period on a house they are not assigned to',
+    !!allocateOtherHouseError
+  );
 
   console.log(`\n${passCount} passed, ${failCount} failed.`);
+
+  // Cascades to transaction_allocations automatically (ON DELETE CASCADE).
+  await supabaseAdmin.from('transactions').delete().like('utr_number', 'TEST%');
+
   process.exit(failCount > 0 ? 1 : 0);
 }
 

@@ -16,7 +16,7 @@ router.get('/', authenticate, async (req, res) => {
   // endpoint *should* return.
   const { data: memberships, error: membershipError } = await supabase
     .from('society_members')
-    .select('id, society_id, role, is_committee_member, status, societies(name, upi_vpa, upi_payee_name)')
+    .select('id, society_id, role, is_committee_member, status, phone_number, societies(name, upi_vpa, upi_payee_name)')
     .eq('auth_user_id', req.user.id);
 
   if (membershipError) {
@@ -34,6 +34,7 @@ router.get('/', authenticate, async (req, res) => {
       role: membership.role,
       isCommitteeMember: membership.is_committee_member,
       status: membership.status,
+      phoneNumber: membership.phone_number,
     };
 
     if (membership.role === 'Resident') {
@@ -51,11 +52,15 @@ router.get('/', authenticate, async (req, res) => {
 
       let billingPeriods = [];
       if (houseIds.length > 0) {
+        // Ordered oldest-first so this list always matches FIFO allocation
+        // order - the first row here is exactly the one POST /transactions
+        // will apply the resident's next payment to.
         const { data: periods, error: periodsError } = await supabase
           .from('billing_periods')
           .select('id, house_id, period_month, amount_due, status')
           .in('house_id', houseIds)
-          .eq('status', 'Open');
+          .eq('status', 'Open')
+          .order('period_month', { ascending: true });
 
         if (periodsError) {
           return res.status(500).json({ error: periodsError.message });
@@ -65,6 +70,10 @@ router.get('/', authenticate, async (req, res) => {
 
       entry.houseAssignments = assignments;
       entry.openBillingPeriods = billingPeriods;
+      // Convenience total so the client doesn't need to sum client-side -
+      // this is the resident's full outstanding balance across all open
+      // periods on all their assigned houses, arrears included.
+      entry.totalOutstanding = billingPeriods.reduce((sum, period) => sum + Number(period.amount_due), 0);
     }
 
     if (membership.role === 'Admin' || membership.is_committee_member) {
