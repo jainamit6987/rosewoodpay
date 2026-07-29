@@ -296,3 +296,35 @@ VALUES
     (SELECT id FROM public.billing_periods WHERE house_id = '0000000f-0000-0000-0000-00000000000f' AND period_month = date_trunc('month', CURRENT_DATE) - INTERVAL '4 months'),
     2200.00
 );
+
+
+--
+-- Society expense fixture (UtilityBill)
+--
+-- Models the Admin recording a society-level expense - the society paying
+-- an electricity bill, not a resident paying the society - so unlike every
+-- other transaction above it has house_id = NULL and a payee_name instead
+-- (see 20260726010000_society_expenses_house_optional.sql). Recorded
+-- already-Verified, matching POST /transactions' actual behavior for
+-- expense types (auto-verified at submission - by the time an Admin
+-- types it in, the money has already left the account, so there is no
+-- separate review checkpoint to model here; see the "Society Expenses"
+-- progress log entry for why).
+
+-- 16. The society-wide electricity bill for the current month.
+INSERT INTO public.transactions (id, society_id, house_id, submitted_by, amount, utr_number, payment_status, processing_status, transaction_type, payee_name, verified_by, verified_at)
+VALUES
+(
+    '00000013-0000-0000-0000-000000000013',
+    '00000003-0000-0000-0000-000000000003',
+    NULL,
+    '00000001-0000-0000-0000-000000000001',
+    18500.00,
+    'SEEDUTILITYBILL1',
+    'Success',
+    'Verified',
+    'UtilityBill',
+    'BEST Electricity Board',
+    '00000001-0000-0000-0000-000000000001',
+    now()
+);

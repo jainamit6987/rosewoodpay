@@ -11,10 +11,12 @@ const PG_UNIQUE_VIOLATION = '23505';
 const PG_INSUFFICIENT_PRIVILEGE = '42501';
 
 // Kept in sync with the chk_transaction_type CHECK constraint added in
-// 20260725030000_add_transaction_type_and_multiple_rule.sql. Only
-// MAINTENANCE_TYPE is produced by any code path today - the others are
-// reserved for the not-yet-built admin society-expense feature (utility
-// bills, labour salaries).
+// 20260725030000_add_transaction_type_and_multiple_rule.sql. MAINTENANCE_TYPE
+// is a resident paying the society, allocated against their house's billing
+// periods below; the other three are the society paying someone else
+// (a vendor, an employee) and take the entirely separate, house-less path
+// near the top of this handler - see
+// 20260726010000_society_expenses_house_optional.sql.
 const TRANSACTION_TYPES = ['Maintenance', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
 
@@ -47,16 +49,18 @@ function toDateOnly(date) {
 router.post('/', authenticate, async (req, res) => {
   const {
     house_id,
+    society_id,
     amount,
     utr_number,
     raw_shared_payload,
     proof_file_path,
     txn_date,
     transaction_type,
+    payee_name,
   } = req.body || {};
 
-  if (!house_id || amount === undefined || amount === null) {
-    return res.status(400).json({ error: 'house_id and amount are required.' });
+  if (amount === undefined || amount === null) {
+    return res.status(400).json({ error: 'amount is required.' });
   }
 
   if (typeof amount !== 'number' || amount <= 0) {
@@ -80,6 +84,123 @@ router.post('/', authenticate, async (req, res) => {
   }
 
   const supabase = req.supabase;
+
+  // UtilityBill/Salary/Other are society-level expenses - the society
+  // paying a vendor or an employee, never something a specific house owes
+  // - so they take an entirely separate path from here on: no house, no
+  // billing periods, no allocations, Admin-only. See
+  // 20260726010000_society_expenses_house_optional.sql for the matching
+  // "house_id required for Maintenance, forbidden otherwise" DB constraint
+  // - this app-layer check exists only to give a clean 4xx message; RLS
+  // and that CHECK constraint are the real enforcement underneath it.
+  //
+  // Unlike Maintenance, these skip Submitted -> Verify/Reject entirely and
+  // are recorded as Verified immediately. Verify/Reject exists for
+  // Maintenance to gate whether a *billing period* gets credited as paid -
+  // rejecting never recovers the resident's money either, but it does
+  // leave the underlying debt uncleared until a correct payment is found.
+  // An expense has no analogous debt to leave uncleared: the money is
+  // already gone by the time an Admin types it in, and (discussed and
+  // confirmed with the user) a Submitted-then-self-reviewed checkpoint
+  // here would just be theater - the Admin recording it is already the
+  // attestation that it's real.
+  if (resolvedTransactionType !== MAINTENANCE_TYPE) {
+    if (house_id) {
+      return res.status(400).json({
+        error: `house_id must not be provided for ${resolvedTransactionType} transactions - they are society-level expenses, not owed by any house.`,
+      });
+    }
+    if (!society_id) {
+      return res.status(400).json({ error: 'society_id is required for non-Maintenance transactions.' });
+    }
+    if (!payee_name || typeof payee_name !== 'string' || !payee_name.trim()) {
+      return res.status(400).json({
+        error: 'payee_name is required for non-Maintenance transactions (who or what was paid).',
+      });
+    }
+
+    // status='Active' is required explicitly here, not just implied by
+    // RLS - this query reads the caller's OWN row, which the deliberately
+    // ungated "Users can view their own society_member record" policy
+    // always lets them see regardless of status, so a Suspended admin
+    // could otherwise still pass this check (see
+    // 20260727000000_enforce_suspended_status_in_rls.sql's closing note).
+    const { data: adminMembership, error: adminError } = await supabase
+      .from('society_members')
+      .select('id')
+      .eq('society_id', society_id)
+      .eq('auth_user_id', req.user.id)
+      .eq('is_admin', true)
+      .eq('status', 'Active')
+      .maybeSingle();
+
+    if (adminError) {
+      return res.status(500).json({ error: adminError.message });
+    }
+    if (!adminMembership) {
+      return res.status(403).json({ error: 'Only an Admin can record a society expense (UtilityBill/Salary/Other).' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const { data: transaction, error: insertError } = await supabase
+      .from('transactions')
+      .insert({
+        society_id,
+        house_id: null,
+        submitted_by: req.user.id,
+        amount,
+        utr_number: utr_number || null,
+        raw_shared_payload: raw_shared_payload || null,
+        proof_file_path: proof_file_path || null,
+        txn_date: txn_date || null,
+        transaction_type: resolvedTransactionType,
+        payee_name: payee_name.trim(),
+        processing_status: 'Verified',
+        payment_status: 'Success',
+        verified_by: req.user.id,
+        verified_at: nowIso,
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      if (insertError.code === PG_UNIQUE_VIOLATION) {
+        return res.status(409).json({ error: 'This UTR has already been submitted for this society.' });
+      }
+      if (insertError.code === PG_INSUFFICIENT_PRIVILEGE || insertError.message?.includes('row-level security')) {
+        return res.status(403).json({ error: 'Not allowed to record this expense.' });
+      }
+      return res.status(500).json({ error: insertError.message });
+    }
+
+    const { error: auditError } = await supabase.from('audit_events').insert({
+      society_id,
+      actor_user_id: req.user.id,
+      entity_type: 'transaction',
+      entity_id: transaction.id,
+      action: 'Verified',
+      metadata: {
+        amount: transaction.amount,
+        utr_number: transaction.utr_number,
+        payee_name: transaction.payee_name,
+        transaction_type: transaction.transaction_type,
+        auto_verified: true,
+      },
+    });
+
+    if (auditError) {
+      return res.status(500).json({
+        error: `Expense recorded but the audit log entry failed: ${auditError.message}`,
+        transaction,
+      });
+    }
+
+    return res.status(201).json({ ...transaction, allocations: [] });
+  }
+
+  if (!house_id) {
+    return res.status(400).json({ error: 'house_id is required for Maintenance payments.' });
+  }
 
   // society_id is derived from the house, never trusted from the request
   // body, so a caller cannot submit into a society they are not a member of.
@@ -293,10 +414,15 @@ router.post('/', authenticate, async (req, res) => {
 router.get('/pending', authenticate, async (req, res) => {
   const supabase = req.supabase;
 
+  // Same reasoning as the expense-creation admin check above: this reads
+  // the caller's own row (always visible regardless of status via the
+  // ungated "own record" policy), so status='Active' must be checked here
+  // explicitly rather than relying on RLS to have already filtered it out.
   const { data: memberships, error: membershipError } = await supabase
     .from('society_members')
     .select('society_id')
     .eq('auth_user_id', req.user.id)
+    .eq('status', 'Active')
     .or('is_admin.eq.true,is_committee_member.eq.true');
 
   if (membershipError) {
@@ -313,7 +439,7 @@ router.get('/pending', authenticate, async (req, res) => {
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')
@@ -334,7 +460,7 @@ router.get('/pending', authenticate, async (req, res) => {
 async function loadTransactionAndCheckAdmin(supabase, userId, transactionId) {
   const { data: transaction, error: transactionError } = await supabase
     .from('transactions')
-    .select('id, society_id, house_id, amount, utr_number, transaction_type, processing_status')
+    .select('id, society_id, house_id, amount, utr_number, transaction_type, payee_name, processing_status')
     .eq('id', transactionId)
     .maybeSingle();
 
@@ -345,12 +471,16 @@ async function loadTransactionAndCheckAdmin(supabase, userId, transactionId) {
     return { transaction: null, isAdmin: false };
   }
 
+  // Same reasoning as the other two raw is_admin checks in this file:
+  // this reads the caller's own row, always visible regardless of status,
+  // so status='Active' must be checked here explicitly too.
   const { data: adminMembership, error: adminError } = await supabase
     .from('society_members')
     .select('id')
     .eq('society_id', transaction.society_id)
     .eq('auth_user_id', userId)
     .eq('is_admin', true)
+    .eq('status', 'Active')
     .maybeSingle();
 
   if (adminError) {
@@ -494,7 +624,12 @@ router.post('/:id/verify', authenticate, async (req, res) => {
     entity_type: 'transaction',
     entity_id: id,
     action: 'Verified',
-    metadata: { amount: transaction.amount, utr_number: transaction.utr_number, closedPeriods },
+    metadata: {
+      amount: transaction.amount,
+      utr_number: transaction.utr_number,
+      payee_name: transaction.payee_name,
+      closedPeriods,
+    },
   });
 
   if (auditError) {
@@ -564,7 +699,12 @@ router.post('/:id/reject', authenticate, async (req, res) => {
     entity_type: 'transaction',
     entity_id: id,
     action: 'Rejected',
-    metadata: { amount: transaction.amount, utr_number: transaction.utr_number, reason: reason.trim() },
+    metadata: {
+      amount: transaction.amount,
+      utr_number: transaction.utr_number,
+      payee_name: transaction.payee_name,
+      reason: reason.trim(),
+    },
   });
 
   if (auditError) {

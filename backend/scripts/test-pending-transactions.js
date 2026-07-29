@@ -13,6 +13,11 @@ const BASE_URL = `http://localhost:${env.port}`;
 const HOUSE_A101 = '00000006-0000-0000-0000-000000000006';
 const HOUSE_R24 = '00000007-0000-0000-0000-000000000007';
 
+function currentMonthStartDateOnly() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+}
+
 let passCount = 0;
 let failCount = 0;
 
@@ -120,6 +125,20 @@ async function main() {
 
   // Cascades to transaction_allocations automatically (ON DELETE CASCADE).
   await supabaseAdmin.from('transactions').delete().like('utr_number', 'TESTPENDING%');
+  // R-24's only seeded billing period is already 'Closed' (see seed.sql),
+  // so `second` above (2500 on HOUSE_R24) always needed a fresh 'Open'
+  // period auto-generated to allocate to - that row has no test-prefixed
+  // field of its own and is not removed by the transactions cleanup
+  // above. Same leaked-fixture class as HOUSE_A101's in
+  // test-transaction-type-multiple-rule.js and HOUSE_R24's in
+  // test-verify-reject.js: remove anything beyond the one current-month
+  // period seed.sql describes for this house, or later runs of
+  // test-rls.js silently break on "exactly 1 billing period for R-24".
+  await supabaseAdmin
+    .from('billing_periods')
+    .delete()
+    .eq('house_id', HOUSE_R24)
+    .neq('period_month', currentMonthStartDateOnly());
 
   process.exit(failCount > 0 ? 1 : 0);
 }

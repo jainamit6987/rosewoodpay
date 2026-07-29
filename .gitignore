@@ -15,3 +15,6 @@ supabase/.temp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Excel lock files
+~$*.xlsx

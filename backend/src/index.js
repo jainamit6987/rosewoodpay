@@ -6,6 +6,9 @@ const authRoutes = require('./routes/auth');
 const meRoutes = require('./routes/me');
 const transactionsRoutes = require('./routes/transactions');
 const housesRoutes = require('./routes/houses');
+const membersRoutes = require('./routes/members');
+const societyRoutes = require('./routes/society');
+const assignmentsRoutes = require('./routes/assignments');
 
 const app = express();
 app.use(cors());
@@ -19,6 +22,9 @@ app.use('/auth', authRoutes);
 app.use('/me', meRoutes);
 app.use('/transactions', transactionsRoutes);
 app.use('/houses', housesRoutes);
+app.use('/members', membersRoutes);
+app.use('/society', societyRoutes);
+app.use('/assignments', assignmentsRoutes);
 
 // Confirms the server can reach the linked Supabase project using the
 // service-role key. Does not expose the key or any row data in the response.

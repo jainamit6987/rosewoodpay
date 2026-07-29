@@ -19,6 +19,11 @@ const BASE_URL = `http://localhost:${env.port}`;
 const HOUSE_A101 = '00000006-0000-0000-0000-000000000006'; // default_monthly_amount = 2200
 const BASE_AMOUNT = 2200;
 
+function currentMonthStartDateOnly() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+}
+
 let passCount = 0;
 let failCount = 0;
 
@@ -47,8 +52,11 @@ async function post(path, token, body) {
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 
+const SOCIETY_ID = '00000003-0000-0000-0000-000000000003';
+
 async function main() {
   const residentToken = await loginToken('resident@society.app', 'password');
+  const adminToken = await loginToken('admin@society.app', 'password');
   const testUtr = `TESTTYPE${Date.now()}`;
 
   // 1. A partial-month amount (1.5x the base) must be rejected, and never
@@ -104,14 +112,18 @@ async function main() {
   check('an unrecognized transaction_type is rejected (400)', badType.status === 400, badType);
 
   // 5. A non-Maintenance type is exempt from the multiple rule entirely -
-  //    an arbitrary amount that is not a multiple of the base still
-  //    succeeds, because utility bills/salaries (once that feature exists)
-  //    have no monthly "base amount" to be a multiple of.
-  const utilityBill = await post('/transactions', residentToken, {
-    house_id: HOUSE_A101,
+  //    an arbitrary amount that is not a multiple of any house's base
+  //    amount still succeeds, because a society expense (utility
+  //    bill/salary) has no monthly "base amount" to be a multiple of. Full
+  //    coverage of the expense-only fields (payee_name, society_id,
+  //    Admin-only, no house_id) lives in test-society-expenses.js - this
+  //    just confirms the multiple rule specifically stays out of the way.
+  const utilityBill = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
     amount: 999,
     utr_number: `${testUtr}UTILITY`,
     transaction_type: 'UtilityBill',
+    payee_name: 'Test Utility Co',
   });
   check(
     'a non-Maintenance type with a non-multiple amount is exempt from the rule and succeeds (201)',
@@ -119,10 +131,48 @@ async function main() {
     utilityBill.body
   );
 
+  // 6. The old pre-expense-feature shape - a non-Maintenance type together
+  //    with a house_id - is now rejected outright, since house_id and
+  //    transaction_type are now tied together by a DB CHECK constraint
+  //    (20260726010000_society_expenses_house_optional.sql): Maintenance
+  //    always has a house, every other type never does.
+  const utilityWithHouse = await post('/transactions', adminToken, {
+    house_id: HOUSE_A101,
+    amount: 999,
+    utr_number: `${testUtr}UTILITYWITHHOUSE`,
+    transaction_type: 'UtilityBill',
+    payee_name: 'Test Utility Co',
+  });
+  check(
+    'a non-Maintenance type with a house_id is rejected (400)',
+    utilityWithHouse.status === 400 && /house_id must not be provided/i.test(utilityWithHouse.body.error || ''),
+    utilityWithHouse
+  );
+
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
+  // The UtilityBill case is recorded already-Verified (see
+  // 20260726010000_society_expenses_house_optional.sql), which writes an
+  // audit_events row at creation time - clean that up too, not just the
+  // transaction row itself.
+  if (utilityBill.body.id) {
+    await supabaseAdmin.from('audit_events').delete().eq('entity_id', utilityBill.body.id);
+  }
   // Cascades to transaction_allocations automatically (ON DELETE CASCADE).
   await supabaseAdmin.from('transactions').delete().like('utr_number', 'TESTTYPE%');
+  // Test 3 (the clean 2x-base payment) deliberately auto-generates a
+  // second, next-month billing_periods row for HOUSE_A101 if it didn't
+  // already exist - the exact "pay ahead of schedule" case this rule must
+  // allow. That row has no test-prefixed field to filter it by and is not
+  // itself deleted by the transactions cleanup above, so remove anything
+  // beyond the one current-month period seed.sql describes for this house
+  // - otherwise it silently breaks test-rls.js's "resident sees exactly 1
+  // billing period for their own house" assertion on a later run.
+  await supabaseAdmin
+    .from('billing_periods')
+    .delete()
+    .eq('house_id', HOUSE_A101)
+    .neq('period_month', currentMonthStartDateOnly());
 
   process.exit(failCount > 0 ? 1 : 0);
 }
