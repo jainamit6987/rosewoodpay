@@ -273,4 +273,132 @@ router.post('/:houseId/billing-periods', authenticate, async (req, res) => {
   res.status(201).json(created);
 });
 
+// Admin-only: forgives an Open billing period's dues - the "update
+// billing -- for waived" gap from the workflow doc (the doc's own note
+// that "close is done when transaction is approved" already covers the
+// Open -> Closed transition via the existing verify flow in
+// routes/transactions.js; this is the other transition, Open -> Waived,
+// that nothing in this codebase has ever performed).
+//
+// Deliberately one-way and Open-only, matching every other status
+// transition in this codebase (verify/reject, suspend/reactivate): a
+// Closed period cannot be waived after the fact (that money was already
+// collected and verified - waiving it now would misrepresent what
+// actually happened), and there is no un-waive action, since nothing has
+// asked for one yet. Also refuses to waive a period that already has ANY
+// transaction_allocations row against it, Verified or still-Submitted -
+// a period with payment activity already underway is not the "nobody has
+// paid this, and nobody should have to" case this action exists for.
+router.post('/:houseId/billing-periods/:periodId/waive', authenticate, async (req, res) => {
+  const { houseId, periodId } = req.params;
+  const { reason } = req.body || {};
+  const supabase = req.supabase;
+
+  if (typeof reason !== 'string' || !reason.trim()) {
+    return res.status(400).json({ error: 'A non-empty reason is required to waive a billing period.' });
+  }
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, society_id')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  // Same raw own-row is_admin/status='Active' check as the sibling create
+  // route above - RLS's ungated "own record" policy would otherwise let a
+  // Suspended admin's already-issued token slip through.
+  const { data: adminMembership, error: adminError } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('society_id', house.society_id)
+    .eq('auth_user_id', req.user.id)
+    .eq('is_admin', true)
+    .eq('status', 'Active')
+    .maybeSingle();
+
+  if (adminError) {
+    return res.status(500).json({ error: adminError.message });
+  }
+  if (!adminMembership) {
+    return res.status(403).json({ error: 'Only an Admin of this house\'s society can waive a billing period.' });
+  }
+
+  const { data: period, error: periodError } = await supabase
+    .from('billing_periods')
+    .select('id, period_month, status')
+    .eq('id', periodId)
+    .eq('house_id', houseId)
+    .maybeSingle();
+
+  if (periodError) {
+    return res.status(500).json({ error: periodError.message });
+  }
+  if (!period) {
+    return res.status(404).json({ error: 'Billing period not found for this house.' });
+  }
+  if (period.status !== 'Open') {
+    return res.status(409).json({ error: `This billing period is already "${period.status}" and cannot be waived.` });
+  }
+
+  const { data: allocations, error: allocationsError } = await supabase
+    .from('transaction_allocations')
+    .select('id')
+    .eq('billing_period_id', periodId)
+    .limit(1);
+
+  if (allocationsError) {
+    return res.status(500).json({ error: allocationsError.message });
+  }
+  if (allocations && allocations.length > 0) {
+    return res.status(409).json({
+      error: 'This billing period already has a payment allocated against it and cannot be waived.',
+    });
+  }
+
+  const waivedAt = new Date().toISOString();
+
+  const { data: updated, error: updateError } = await supabase
+    .from('billing_periods')
+    .update({
+      status: 'Waived',
+      amount_due: 0,
+      waived_reason: reason.trim(),
+      waived_by: req.user.id,
+      waived_at: waivedAt,
+      updated_at: waivedAt,
+    })
+    .eq('id', periodId)
+    .select('id, house_id, period_month, base_amount, amount_due, status, waived_reason, waived_by, waived_at')
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  const { error: auditError } = await supabase.from('audit_events').insert({
+    society_id: house.society_id,
+    actor_user_id: req.user.id,
+    entity_type: 'billing_period',
+    entity_id: periodId,
+    action: 'Waived',
+    metadata: { house_id: houseId, period_month: period.period_month, reason: reason.trim() },
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Billing period waived but the audit log entry failed: ${auditError.message}`,
+      billingPeriod: updated,
+    });
+  }
+
+  res.json(updated);
+});
+
 module.exports = router;
