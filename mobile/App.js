@@ -8,6 +8,7 @@ import DuesScreen from './src/screens/DuesScreen';
 import SubmitPaymentScreen from './src/screens/SubmitPaymentScreen';
 import AdminReviewScreen from './src/screens/AdminReviewScreen';
 import ModeChooserScreen from './src/screens/ModeChooserScreen';
+import BillingHistoryScreen from './src/screens/BillingHistoryScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -21,6 +22,7 @@ import ModeChooserScreen from './src/screens/ModeChooserScreen';
 // bars).
 function AuthenticatedApp() {
   const [paymentTarget, setPaymentTarget] = useState(null);
+  const [historyTarget, setHistoryTarget] = useState(null);
   // null = no explicit choice made yet. Only matters when both resident and
   // admin/committee access are available - see hasResidentAccess/
   // hasAdminAccess below; when only one applies there is nothing to choose
@@ -105,6 +107,10 @@ function AuthenticatedApp() {
     );
   }
 
+  if (historyTarget) {
+    return <BillingHistoryScreen house={historyTarget} onBack={() => setHistoryTarget(null)} />;
+  }
+
   const effectiveMode = mode || (hasAdminAccess ? 'admin' : 'resident');
 
   if (effectiveMode === 'admin') {
@@ -118,7 +124,7 @@ function AuthenticatedApp() {
   // is the only thing available), this screen is the entire experience.
   // Getting to Admin/Committee from here means logging out and choosing
   // again, not a shortcut on this screen - see the note in DuesScreen.js.
-  return <DuesScreen onPayHouse={setPaymentTarget} onLogout={logout} />;
+  return <DuesScreen onPayHouse={setPaymentTarget} onViewHistory={setHistoryTarget} onLogout={logout} />;
 }
 
 function RootNavigator() {

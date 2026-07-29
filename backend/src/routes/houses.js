@@ -50,4 +50,50 @@ router.get('/:houseId/transactions', authenticate, async (req, res) => {
   res.json(transactions);
 });
 
+// Full billing history for a house - every period regardless of status
+// (Open, Closed, Waived), not just the still-owing ones GET /me returns.
+// This is the "all periods" screen from the workflow doc: GET /me
+// deliberately only surfaces Open periods (it feeds the pay-dues flow), so
+// a resident has had no way to see a month they already paid off, or one
+// waived by the society, without this separate endpoint. Same visibility
+// model as GET /:houseId/transactions above - RLS (the existing
+// "Residents can view billing periods for their assigned flats" /
+// "Admins and Committee can view billing periods" policies) decides what
+// comes back, this route only distinguishes "house not visible at all"
+// from a real result.
+router.get('/:houseId/billing-periods', authenticate, async (req, res) => {
+  const { houseId } = req.params;
+  const supabase = req.supabase;
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  // Newest month first, matching the transactions history endpoint's
+  // newest-first ordering - a history view reads top-down as "here's the
+  // most recent, and here's how it built up".
+  const { data: billingPeriods, error: periodsError } = await supabase
+    .from('billing_periods')
+    .select('id, period_month, base_amount, amount_due, status')
+    .eq('house_id', houseId)
+    .order('period_month', { ascending: false });
+
+  if (periodsError) {
+    return res.status(500).json({ error: periodsError.message });
+  }
+
+  // Same as above: an empty array is the normal outcome for a resident with
+  // no visible assignment to this house, not an error condition.
+  res.json(billingPeriods);
+});
+
 module.exports = router;

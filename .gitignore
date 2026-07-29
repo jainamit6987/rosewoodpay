@@ -18,3 +18,8 @@ Thumbs.db
 
 # Excel lock files
 ~$*.xlsx
+
+# Personal workflow-tracking doc - a planning tool, not app code; kept
+# locally, not versioned (frequent edits, and .xlsx diffs are unreadable).
+app-workflows.csv
+app-workflows.xlsx

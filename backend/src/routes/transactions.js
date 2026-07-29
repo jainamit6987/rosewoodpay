@@ -452,6 +452,67 @@ router.get('/pending', authenticate, async (req, res) => {
   res.json(pending);
 });
 
+// Every transaction across every house the caller personally has an Active
+// assignment to - the aggregated "all my transactions" view the workflow
+// doc flagged as missing (GET /houses/:houseId/transactions only ever
+// covers one house at a time; a resident with more than one house had no
+// single call that combined them). Newest first, across every society the
+// caller belongs to.
+//
+// Deliberately keyed off "does this member have an Active house
+// assignment", the same principle GET /me's personal-dues section uses,
+// never off is_admin/is_committee_member - an Admin who is also a resident
+// (e.g. admin@society.app's own D-404) gets exactly their own personal
+// transactions here, not their society's full admin transactions report
+// (that is GET /transactions/pending plus GET /houses/:houseId/transactions,
+// deliberately separate).
+router.get('/mine', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+
+  const { data: memberships, error: membershipError } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('auth_user_id', req.user.id);
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+
+  const membershipIds = (memberships || []).map((m) => m.id);
+  if (membershipIds.length === 0) {
+    return res.json([]);
+  }
+
+  const { data: assignments, error: assignmentError } = await supabase
+    .from('resident_house_assignments')
+    .select('house_id')
+    .in('society_member_id', membershipIds)
+    .eq('status', 'Active');
+
+  if (assignmentError) {
+    return res.status(500).json({ error: assignmentError.message });
+  }
+
+  const houseIds = [...new Set((assignments || []).map((a) => a.house_id))];
+  if (houseIds.length === 0) {
+    return res.json([]);
+  }
+
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('transactions')
+    .select(
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+    )
+    .in('house_id', houseIds)
+    .order('created_at', { ascending: false });
+
+  if (transactionsError) {
+    return res.status(500).json({ error: transactionsError.message });
+  }
+
+  res.json(transactions);
+});
+
 // Confirms the caller is an Admin of the transaction's own society - not
 // just "an Admin somewhere". Returns the transaction row (via the caller's
 // RLS-scoped client, so a non-member gets the same "not found" outcome as a

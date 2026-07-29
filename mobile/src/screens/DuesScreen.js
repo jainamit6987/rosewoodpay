@@ -43,7 +43,7 @@ function groupPeriodsByHouse(membership) {
   return houses;
 }
 
-export default function DuesScreen({ onPayHouse, onLogout }) {
+export default function DuesScreen({ onPayHouse, onViewHistory, onLogout }) {
   const { accessToken } = useAuth();
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -151,6 +151,10 @@ export default function DuesScreen({ onPayHouse, onLogout }) {
             <Text style={styles.houseNumber}>{entry.house?.house_number}</Text>
             <Text style={styles.relationshipTag}>{entry.relationshipType}</Text>
           </View>
+
+          <TouchableOpacity onPress={() => onViewHistory(entry.house)}>
+            <Text style={styles.historyLink}>View full billing history</Text>
+          </TouchableOpacity>
 
           {entry.periods.length === 0 ? (
             <Text style={styles.paidUp}>All caught up - no open dues.</Text>
@@ -273,6 +277,12 @@ const styles = StyleSheet.create({
   paidUp: {
     fontSize: 14,
     color: '#2e7d32',
+  },
+  historyLink: {
+    fontSize: 12,
+    color: '#1a73e8',
+    fontWeight: '600',
+    marginBottom: 10,
   },
   selectHint: {
     fontSize: 12,
