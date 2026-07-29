@@ -3,8 +3,31 @@ const authenticate = require('../middleware/authenticate');
 
 const router = express.Router();
 
+const PG_UNIQUE_VIOLATION = '23505';
+
 // Permissive but real UPI VPA shape: <handle>@<psp>, e.g. society@okhdfcbank.
 const UPI_VPA_PATTERN = /^[a-zA-Z0-9.\-_]{2,100}@[a-zA-Z0-9.\-]{2,100}$/;
+
+// Same walk-forward-one-month helpers as routes/houses.js's own
+// POST /:houseId/billing-periods and the auto-generation path in
+// routes/transactions.js - duplicated locally rather than imported, since
+// this codebase has no shared utils module yet. Kept behaviorally
+// identical on purpose: whichever of the three call sites creates a period
+// next continues the exact same unbroken monthly sequence for that house.
+function addMonths(dateString, count) {
+  const date = new Date(dateString);
+  date.setUTCMonth(date.getUTCMonth() + count);
+  return date;
+}
+
+function startOfCurrentMonthUtc() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+function toDateOnly(date) {
+  return date.toISOString().slice(0, 10);
+}
 
 // Intl.supportedValuesOf('timeZone') looked like the obvious way to
 // validate this, but this Node build's bundled ICU data enumerates only
@@ -164,6 +187,134 @@ router.patch('/:id', authenticate, async (req, res) => {
   }
 
   res.json(updated);
+});
+
+// POST /society/:id/billing-periods/generate-next-month - Admin-only. The
+// "create billing record for all houses (next month only)" bulk action from
+// the workflow doc: runs the same one-month-forward logic as
+// POST /houses/:houseId/billing-periods, individually, across every Active
+// house in the society in one call, instead of an admin having to trigger
+// it house-by-house every month.
+//
+// Deliberately reuses each house's own existing cursor (its own latest
+// period + 1 month) rather than a single fixed calendar month applied to
+// every house alike - a house that is already ahead (paid several months
+// in advance) or behind (missed a run, or was created later than the
+// others) always gets exactly its own next month, never a duplicate of
+// what it already has and never a gap-creating jump past what it's missing.
+// In the common case where every house is in sync, that still resolves to
+// the same calendar month for all of them; it just does not assume that.
+//
+// A single bad/unconfigured house (no default_monthly_amount, or an
+// unexpected insert failure) is recorded in `skipped` and does not abort
+// the rest of the run - a batch of 50 houses should not fail entirely
+// because one of them was never given a rate.
+router.post('/:id/billing-periods/generate-next-month', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+
+  let callerIsAdmin;
+  try {
+    callerIsAdmin = await requireActiveAdmin(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerIsAdmin) {
+    return res.status(403).json({ error: 'Only an Admin of this society can generate billing periods.' });
+  }
+
+  const { data: houses, error: housesError } = await supabase
+    .from('houses')
+    .select('id, house_number, default_monthly_amount')
+    .eq('society_id', societyId)
+    .eq('status', 'Active');
+
+  if (housesError) {
+    return res.status(500).json({ error: housesError.message });
+  }
+
+  const created = [];
+  const skipped = [];
+
+  for (const house of houses || []) {
+    if (!house.default_monthly_amount) {
+      skipped.push({
+        house_id: house.id,
+        house_number: house.house_number,
+        reason: 'No default_monthly_amount configured.',
+      });
+      continue;
+    }
+
+    const { data: existingPeriods, error: existingError } = await supabase
+      .from('billing_periods')
+      .select('period_month')
+      .eq('house_id', house.id)
+      .order('period_month', { ascending: false })
+      .limit(1);
+
+    if (existingError) {
+      skipped.push({ house_id: house.id, house_number: house.house_number, reason: existingError.message });
+      continue;
+    }
+
+    const cursorMonth = existingPeriods && existingPeriods.length > 0 ? existingPeriods[0].period_month : null;
+    const nextMonthDate = toDateOnly(cursorMonth ? addMonths(cursorMonth, 1) : startOfCurrentMonthUtc());
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('billing_periods')
+      .insert({
+        society_id: societyId,
+        house_id: house.id,
+        period_month: nextMonthDate,
+        base_amount: house.default_monthly_amount,
+        amount_due: house.default_monthly_amount,
+        status: 'Open',
+      })
+      .select('id, period_month, base_amount, amount_due, status')
+      .single();
+
+    if (insertError) {
+      skipped.push({
+        house_id: house.id,
+        house_number: house.house_number,
+        reason:
+          insertError.code === PG_UNIQUE_VIOLATION
+            ? `Already has a billing period for ${nextMonthDate}.`
+            : insertError.message,
+      });
+      continue;
+    }
+
+    created.push({ house_id: house.id, house_number: house.house_number, billing_period: inserted });
+  }
+
+  if (created.length > 0) {
+    const { error: auditError } = await supabase.from('audit_events').insert({
+      society_id: societyId,
+      actor_user_id: req.user.id,
+      entity_type: 'billing_period',
+      entity_id: created[0].billing_period.id,
+      action: 'Created',
+      metadata: {
+        bulk: true,
+        houses_created: created.length,
+        houses_skipped: skipped.length,
+        created: created.map((c) => ({ house_id: c.house_id, period_month: c.billing_period.period_month })),
+        skipped,
+      },
+    });
+
+    if (auditError) {
+      return res.status(500).json({
+        error: `Billing periods created but the audit log entry failed: ${auditError.message}`,
+        created,
+        skipped,
+      });
+    }
+  }
+
+  res.json({ created, skipped });
 });
 
 module.exports = router;
