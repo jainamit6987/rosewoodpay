@@ -63,6 +63,26 @@ async function requireActiveAdmin(supabase, userId, societyId) {
   return !!data;
 }
 
+// Same reasoning as requireActiveAdmin above, widened to either capability -
+// used by read-only routes that Committee members may also view (matching
+// the "Committee can view, only Admin can act" split already established by
+// GET /society itself).
+async function requireActiveAdminOrCommittee(supabase, userId, societyId) {
+  const { data, error } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('society_id', societyId)
+    .eq('auth_user_id', userId)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true')
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return !!data;
+}
+
+// YYYY-MM, not a full date - the caller picks a month, not a day.
+const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
 // GET /society - Admin or Committee (of at least one Active membership)
 // lists every society they administer/sit on committee of - in practice
 // almost always exactly one, but this mirrors the same
@@ -187,6 +207,61 @@ router.patch('/:id', authenticate, async (req, res) => {
   }
 
   res.json(updated);
+});
+
+// GET /society/:id/billing-periods?month=YYYY-MM - Admin or Committee. The
+// "view billing records for all houses for a month (select month)" gap
+// from the workflow doc: GET /me's billingPeriods array already gives an
+// Admin/Committee member every period for every house in their society,
+// but with no way to narrow it down to one specific month - a real
+// dashboard view ("show me July's billing across the whole society") had
+// to filter that whole-history array client-side instead of asking the
+// server for exactly what it wants. `month` is optional and defaults to
+// the current calendar month, since that's the far more common case than
+// an admin remembering to always pass one.
+//
+// A house with no billing period generated yet for the requested month
+// simply does not appear in the results - this is a display of what
+// exists, not a full house roster with gaps marked; the bulk
+// POST /society/:id/billing-periods/generate-next-month above is the tool
+// for actually creating what is missing.
+router.get('/:id/billing-periods', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { month } = req.query;
+
+  let callerAllowed;
+  try {
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerAllowed) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view billing records for a society.' });
+  }
+
+  let targetMonth;
+  if (month !== undefined) {
+    if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+      return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+    }
+    targetMonth = `${month}-01`;
+  } else {
+    targetMonth = toDateOnly(startOfCurrentMonthUtc());
+  }
+
+  const { data: periods, error: periodsError } = await supabase
+    .from('billing_periods')
+    .select('id, house_id, period_month, base_amount, amount_due, status, houses(house_number)')
+    .eq('society_id', societyId)
+    .eq('period_month', targetMonth)
+    .order('house_id', { ascending: true });
+
+  if (periodsError) {
+    return res.status(500).json({ error: periodsError.message });
+  }
+
+  res.json({ month: targetMonth, periods });
 });
 
 // POST /society/:id/billing-periods/generate-next-month - Admin-only. The
