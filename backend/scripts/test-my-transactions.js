@@ -94,6 +94,18 @@ async function main() {
     arrears.body
   );
 
+  // --- Each allocation names the actual billing period it covers (not just
+  //     a billing_period_id a UI can't label), via a nested embed through
+  //     transaction_allocations into billing_periods - the seeded catch-up
+  //     payment covers exactly the one period 4 months back ---
+  const arrearsPayment = (arrears.body || []).find((t) => t.utr_number === 'SEEDARREARSPAYMENT1');
+  check(
+    'the seeded catch-up payment\'s allocation names its own billing period\'s period_month',
+    arrearsPayment?.transaction_allocations?.length === 1 &&
+      typeof arrearsPayment.transaction_allocations[0].billing_periods?.period_month === 'string',
+    arrearsPayment
+  );
+
   // --- Admin's own /mine reflects their personal house (D-404) only, not
   //     the society's UtilityBill expense (house_id null) or any other
   //     resident's house - proving this stays personal-assignment-scoped

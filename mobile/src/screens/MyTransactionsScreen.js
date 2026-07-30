@@ -19,13 +19,27 @@ function formatDate(value) {
   return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-// Same shape as AdminReviewScreen's describeAllocations - GET /transactions/mine
-// returns each transaction's own allocations, but not the billing periods'
-// own period_month, so a count is all that's shown here.
+function formatMonth(periodMonth) {
+  return new Date(periodMonth).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+}
+
+// Names the actual month(s) this payment was allocated to, not just a
+// count - the DB has always fully supported this (transaction_allocations
+// is a real many-to-many join table, one row per transaction+billing_period
+// pair, exactly to let one payment cover several months and still know
+// which ones), GET /transactions/mine just wasn't asking for each
+// allocation's own period_month until now. Sorted oldest-first to read as
+// a small FIFO timeline, matching the order the backend actually applies
+// payments in (routes/transactions.js).
 function describeAllocations(transaction) {
-  const count = (transaction.transaction_allocations || []).length;
-  if (count === 0) return 'No billing period allocated yet';
-  return count === 1 ? 'Covers 1 billing period' : `Covers ${count} billing periods`;
+  const allocations = transaction.transaction_allocations || [];
+  if (allocations.length === 0) return 'No billing period allocated yet';
+  const months = allocations
+    .map((a) => a.billing_periods?.period_month)
+    .filter(Boolean)
+    .sort()
+    .map(formatMonth);
+  return `Covers: ${months.join(', ')}`;
 }
 
 // Kept in sync with the chk_processing_status CHECK constraint. Grouped into
