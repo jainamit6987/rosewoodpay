@@ -225,10 +225,15 @@ router.patch('/:id', authenticate, async (req, res) => {
 // exists, not a full house roster with gaps marked; the bulk
 // POST /society/:id/billing-periods/generate-next-month above is the tool
 // for actually creating what is missing.
+//
+// `house_id` is an optional second filter, added alongside the
+// pendency-report endpoint below - independently useful on its own (e.g. "just
+// C-303's June record" without pulling every house), not something invented
+// only for that report.
 router.get('/:id/billing-periods', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id: societyId } = req.params;
-  const { month } = req.query;
+  const { month, house_id } = req.query;
 
   let callerAllowed;
   try {
@@ -250,18 +255,123 @@ router.get('/:id/billing-periods', authenticate, async (req, res) => {
     targetMonth = toDateOnly(startOfCurrentMonthUtc());
   }
 
-  const { data: periods, error: periodsError } = await supabase
+  let query = supabase
     .from('billing_periods')
     .select('id, house_id, period_month, base_amount, amount_due, status, houses(house_number)')
     .eq('society_id', societyId)
     .eq('period_month', targetMonth)
     .order('house_id', { ascending: true });
 
+  if (house_id !== undefined) {
+    query = query.eq('house_id', house_id);
+  }
+
+  const { data: periods, error: periodsError } = await query;
+
   if (periodsError) {
     return res.status(500).json({ error: periodsError.message });
   }
 
   res.json({ month: targetMonth, periods });
+});
+
+// GET /society/:id/pendency-report?month=YYYY-MM&house_id=... - Admin or
+// Committee (same view-only split as GET /society/:id/billing-periods
+// above; the workflow doc's own row for this labels it "Admin", but every
+// sibling "view ___" report in this codebase is Admin-or-Committee, and
+// generating a report is a read, not an action - treated as the same
+// pattern here rather than a narrower one-off).
+//
+// The S.No 25 gap: "generate pendency report for a month" - who still owes
+// money, as of a given month. Deliberately NOT the same shape as the plain
+// billing-periods-by-month view above: that endpoint is a flat "here are
+// this month's rows" list, while a pendency report has to look backward
+// too - the user's own framing driving this design: "mostly focus on
+// current month but it should also highlight previous open periods as
+// well". A house that is current on this month but still has an unpaid
+// period from three months ago is exactly the case a flat single-month
+// list would hide and this report exists to surface.
+//
+// For each house (optionally narrowed to one via ?house_id=), returns
+// every still-Open billing period with period_month <= the target month,
+// oldest-first, plus a totalOutstanding sum and an overdueMonths count
+// (periods strictly BEFORE the target month - the arrears, not the current
+// month's own due amount). A period *after* the target month (paid ahead
+// of schedule) is deliberately excluded - it is not owed as of this
+// month, so it is not pendency. A house with zero qualifying periods is
+// omitted entirely - this is a "who owes" list, not a full house roster.
+router.get('/:id/pendency-report', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { month, house_id } = req.query;
+
+  let callerAllowed;
+  try {
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerAllowed) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the pendency report.' });
+  }
+
+  let targetMonth;
+  if (month !== undefined) {
+    if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+      return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+    }
+    targetMonth = `${month}-01`;
+  } else {
+    targetMonth = toDateOnly(startOfCurrentMonthUtc());
+  }
+
+  let query = supabase
+    .from('billing_periods')
+    .select('id, house_id, period_month, base_amount, amount_due, status, houses(house_number)')
+    .eq('society_id', societyId)
+    .eq('status', 'Open')
+    .lte('period_month', targetMonth)
+    .order('house_id', { ascending: true })
+    .order('period_month', { ascending: true });
+
+  if (house_id !== undefined) {
+    query = query.eq('house_id', house_id);
+  }
+
+  const { data: openPeriods, error: periodsError } = await query;
+
+  if (periodsError) {
+    return res.status(500).json({ error: periodsError.message });
+  }
+
+  const houseMap = new Map();
+  for (const period of openPeriods || []) {
+    if (!houseMap.has(period.house_id)) {
+      houseMap.set(period.house_id, {
+        house_id: period.house_id,
+        house_number: period.houses?.house_number ?? null,
+        openPeriods: [],
+        totalOutstanding: 0,
+        overdueMonths: 0,
+      });
+    }
+    const entry = houseMap.get(period.house_id);
+    entry.openPeriods.push({
+      id: period.id,
+      period_month: period.period_month,
+      base_amount: period.base_amount,
+      amount_due: period.amount_due,
+      status: period.status,
+    });
+    entry.totalOutstanding += Number(period.amount_due);
+    if (period.period_month < targetMonth) {
+      entry.overdueMonths += 1;
+    }
+  }
+
+  const houses = [...houseMap.values()].sort((a, b) => (a.house_number ?? '').localeCompare(b.house_number ?? ''));
+
+  res.json({ month: targetMonth, houses });
 });
 
 // POST /society/:id/billing-periods/generate-next-month - Admin-only. The

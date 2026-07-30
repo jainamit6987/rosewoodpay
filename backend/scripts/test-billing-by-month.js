@@ -1,10 +1,10 @@
-// Verifies GET /society/:id/billing-periods?month=YYYY-MM
+// Verifies GET /society/:id/billing-periods?month=YYYY-MM&house_id=...
 // (backend/src/routes/society.js): Admin/Committee view of every billing
-// period across every house in a society for one selected month. Requires
-// the server running (npm run dev) and the seed fixtures from
-// supabase/seed.sql to already exist in the connected project (5 seeded
-// houses with a current-month period each; the arrears house C-303 also
-// has a Closed period 4 months back).
+// period across every house in a society for one selected month, narrowable
+// to one house. Requires the server running (npm run dev) and the seed
+// fixtures from supabase/seed.sql to already exist in the connected project
+// (5 seeded houses with a current-month period each; the arrears house
+// C-303 also has a Closed period 4 months back).
 // Run with: node scripts/test-billing-by-month.js
 require('dotenv').config();
 const env = require('../src/config/env');
@@ -14,6 +14,7 @@ const supabaseAdmin = require('../src/config/supabaseAdmin');
 const BASE_URL = `http://localhost:${env.port}`;
 const SOCIETY_ID = '00000003-0000-0000-0000-000000000003';
 const HOUSE_C303_ARREARS = '0000000f-0000-0000-0000-00000000000f';
+const HOUSE_R24 = '00000007-0000-0000-0000-000000000007';
 
 let passCount = 0;
 let failCount = 0;
@@ -116,6 +117,43 @@ async function main() {
       fourMonthsAgoView.body.periods[0].house_id === HOUSE_C303_ARREARS &&
       fourMonthsAgoView.body.periods[0].status === 'Closed',
     fourMonthsAgoView.body
+  );
+
+  // --- house_id narrows the current-month view down to just that one
+  //     house, out of the 5 that would otherwise all appear ---
+  const r24CurrentMonth = await get(`/society/${SOCIETY_ID}/billing-periods?house_id=${HOUSE_R24}`, adminToken);
+  check(
+    'house_id filter narrows the current-month view to just that one house',
+    r24CurrentMonth.status === 200 &&
+      r24CurrentMonth.body.periods.length === 1 &&
+      r24CurrentMonth.body.periods[0].house_id === HOUSE_R24,
+    r24CurrentMonth.body
+  );
+
+  // --- house_id + an explicit month together: the arrears house's
+  //     4-months-back Closed period, scoped correctly by both filters at once ---
+  const c303FourMonthsAgo = await get(
+    `/society/${SOCIETY_ID}/billing-periods?month=${fourMonthsAgo}&house_id=${HOUSE_C303_ARREARS}`,
+    adminToken
+  );
+  check(
+    'house_id + month together scope to exactly that house\'s period for that month',
+    c303FourMonthsAgo.status === 200 &&
+      c303FourMonthsAgo.body.periods.length === 1 &&
+      c303FourMonthsAgo.body.periods[0].house_id === HOUSE_C303_ARREARS,
+    c303FourMonthsAgo.body
+  );
+
+  // --- house_id for a house with nothing in the requested month returns an
+  //     empty array, not an error ---
+  const r24FourMonthsAgo = await get(
+    `/society/${SOCIETY_ID}/billing-periods?month=${fourMonthsAgo}&house_id=${HOUSE_R24}`,
+    adminToken
+  );
+  check(
+    'house_id + a month that house has nothing in returns an empty array, not an error',
+    r24FourMonthsAgo.status === 200 && r24FourMonthsAgo.body.periods.length === 0,
+    r24FourMonthsAgo.body
   );
 
   // --- A month nothing was ever seeded for returns an empty array, not an
