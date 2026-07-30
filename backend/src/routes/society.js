@@ -83,6 +83,11 @@ async function requireActiveAdminOrCommittee(supabase, userId, societyId) {
 // YYYY-MM, not a full date - the caller picks a month, not a day.
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 
+// Same pattern as routes/transactions.js's own UUID_PATTERN, duplicated
+// locally for the same no-shared-utils-module reason as the date helpers
+// above.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // GET /society - Admin or Committee (of at least one Active membership)
 // lists every society they administer/sit on committee of - in practice
 // almost always exactly one, but this mirrors the same
@@ -500,6 +505,114 @@ router.post('/:id/billing-periods/generate-next-month', authenticate, async (req
   }
 
   res.json({ created, skipped });
+});
+
+// Known entity_type/action values actually written by this codebase today
+// (see society.js/houses.js/transactions.js/assignments.js/members.js's own
+// audit_events inserts). Unlike processing_status/transaction_type, neither
+// column has a DB CHECK constraint backing it - audit_events.entity_type and
+// .action are plain free-text VARCHAR(50) - so these lists exist purely to
+// catch a typo'd filter value with a clear 400 rather than a silently-empty
+// result, not to enforce a real schema rule. Keep manually in sync with any
+// future audit_events.insert() call site.
+const AUDIT_ENTITY_TYPES = ['society', 'billing_period', 'transaction', 'resident_house_assignment', 'society_member'];
+const AUDIT_ACTIONS = [
+  'Created',
+  'Updated',
+  'Waived',
+  'Verified',
+  'Rejected',
+  'Approved',
+  'Revoked',
+  'Reassigned',
+  'Suspended',
+  'Reactivated',
+];
+
+// GET /society/:id/audit-log?entity_type=&entity_id=&action=&actor_user_id=&from=&to=
+// - Admin or Committee (same view-only split as every other report in this
+// file). The S.No 30 gap: audit_events has been written to on every
+// sensitive mutation since the very first migration (member
+// create/suspend/reactivate, assignment create/approve/revoke/reassign,
+// transaction verify/reject, billing period create/waive, society edit) but
+// nothing had ever read it back - the table existed purely as a write-only
+// side effect until now.
+//
+// All five filters are optional and combine as an AND, same pattern as
+// GET /transactions/report. entity_type/entity_id together is how a caller
+// looks up "the full history of this one record" (e.g. every event for one
+// specific billing period); actor_user_id alone is "everything this admin
+// has done"; from/to (on created_at, inclusive) is a date-range activity
+// feed. No filters at all returns the whole society's log, newest first.
+//
+// No pagination, same accepted gap as every other listing endpoint in this
+// codebase (GET /transactions/report, GET /houses/:houseId/transactions,
+// etc.) - a real limitation for a table that only ever grows, but not one
+// unique to this endpoint, and not fixed piecemeal here.
+router.get('/:id/audit-log', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { entity_type, entity_id, action, actor_user_id, from, to } = req.query;
+
+  if (entity_type !== undefined && !AUDIT_ENTITY_TYPES.includes(entity_type)) {
+    return res.status(400).json({ error: `entity_type must be one of: ${AUDIT_ENTITY_TYPES.join(', ')}.` });
+  }
+  if (action !== undefined && !AUDIT_ACTIONS.includes(action)) {
+    return res.status(400).json({ error: `action must be one of: ${AUDIT_ACTIONS.join(', ')}.` });
+  }
+  if (entity_id !== undefined && !UUID_PATTERN.test(entity_id)) {
+    return res.status(400).json({ error: 'entity_id must be a valid UUID.' });
+  }
+  if (actor_user_id !== undefined && !UUID_PATTERN.test(actor_user_id)) {
+    return res.status(400).json({ error: 'actor_user_id must be a valid UUID.' });
+  }
+  let fromIso;
+  if (from !== undefined) {
+    const parsed = new Date(from);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'from must be a valid date, e.g. 2026-07-01.' });
+    }
+    fromIso = parsed.toISOString();
+  }
+  let toIso;
+  if (to !== undefined) {
+    const parsed = new Date(to);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'to must be a valid date, e.g. 2026-07-31.' });
+    }
+    toIso = parsed.toISOString();
+  }
+
+  let callerAllowed;
+  try {
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerAllowed) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the audit log.' });
+  }
+
+  let query = supabase
+    .from('audit_events')
+    .select('id, actor_user_id, entity_type, entity_id, action, metadata, created_at')
+    .eq('society_id', societyId)
+    .order('created_at', { ascending: false });
+
+  if (entity_type !== undefined) query = query.eq('entity_type', entity_type);
+  if (entity_id !== undefined) query = query.eq('entity_id', entity_id);
+  if (action !== undefined) query = query.eq('action', action);
+  if (actor_user_id !== undefined) query = query.eq('actor_user_id', actor_user_id);
+  if (fromIso !== undefined) query = query.gte('created_at', fromIso);
+  if (toIso !== undefined) query = query.lte('created_at', toIso);
+
+  const { data: events, error: eventsError } = await query;
+
+  if (eventsError) {
+    return res.status(500).json({ error: eventsError.message });
+  }
+
+  res.json(events);
 });
 
 module.exports = router;
