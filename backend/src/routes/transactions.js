@@ -20,6 +20,21 @@ const PG_INSUFFICIENT_PRIVILEGE = '42501';
 const TRANSACTION_TYPES = ['Maintenance', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
 
+// Kept in sync with the chk_processing_status CHECK constraint in the
+// initial schema - used only to validate the optional ?status= filter on
+// GET /report below, not referenced anywhere else in this file.
+const PROCESSING_STATUSES = [
+  'Submitted',
+  'Queued',
+  'Processing',
+  'Extracted',
+  'Pending_Verification',
+  'Manual_Review',
+  'Verified',
+  'Rejected',
+  'Failed',
+];
+
 // Whole-rupee-and-paise-safe "is amount a whole multiple of base" check.
 // Plain `amount % base !== 0` is unreliable on NUMERIC values that arrive
 // as JS floats (e.g. 6600 % 2200 can come out as a tiny non-zero epsilon),
@@ -450,6 +465,93 @@ router.get('/pending', authenticate, async (req, res) => {
   }
 
   res.json(pending);
+});
+
+// Admin/Committee full transaction report - every transaction across every
+// society the caller administers or sits on the committee of, regardless
+// of status, not just the Submitted-only review queue above. The "view
+// transactions -- report" gap from the workflow doc: before this,
+// GET /pending only ever surfaced Submitted items (a to-do list, not a
+// report), and GET /houses/:houseId/transactions covered every status but
+// only one house at a time - there was no single call that gave a
+// full-society, all-status view. Newest-first, matching every other
+// transaction-listing endpoint in this codebase.
+//
+// All four query filters are optional and combine with AND: ?status=
+// (one exact processing_status), ?house_id= (one house - if it belongs to
+// a different society than the caller administers, the combined query
+// simply returns nothing, never another society's data), ?transaction_type=
+// (one exact type), and ?from=/?to= (an inclusive created_at range).
+// Filters on created_at (always set, DEFAULT NOW()) rather than the
+// resident-supplied, optional txn_date - a report filtered by a field that
+// can silently be NULL would just as silently drop real rows.
+router.get('/report', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { status, house_id, transaction_type, from, to } = req.query;
+
+  if (status !== undefined && !PROCESSING_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `status must be one of: ${PROCESSING_STATUSES.join(', ')}.` });
+  }
+  if (transaction_type !== undefined && !TRANSACTION_TYPES.includes(transaction_type)) {
+    return res.status(400).json({ error: `transaction_type must be one of: ${TRANSACTION_TYPES.join(', ')}.` });
+  }
+  let fromIso;
+  if (from !== undefined) {
+    const parsed = new Date(from);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'from must be a valid date, e.g. 2026-07-01.' });
+    }
+    fromIso = parsed.toISOString();
+  }
+  let toIso;
+  if (to !== undefined) {
+    const parsed = new Date(to);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'to must be a valid date, e.g. 2026-07-31.' });
+    }
+    toIso = parsed.toISOString();
+  }
+
+  // Same reasoning as GET /pending above: reads the caller's own row,
+  // always visible regardless of status, so status='Active' must be
+  // checked here explicitly rather than relying on RLS alone.
+  const { data: memberships, error: membershipError } = await supabase
+    .from('society_members')
+    .select('society_id')
+    .eq('auth_user_id', req.user.id)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true');
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+
+  const societyIds = [...new Set((memberships || []).map((m) => m.society_id))];
+  if (societyIds.length === 0) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the transaction report.' });
+  }
+
+  let query = supabase
+    .from('transactions')
+    .select(
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+    )
+    .in('society_id', societyIds)
+    .order('created_at', { ascending: false });
+
+  if (status !== undefined) query = query.eq('processing_status', status);
+  if (house_id !== undefined) query = query.eq('house_id', house_id);
+  if (transaction_type !== undefined) query = query.eq('transaction_type', transaction_type);
+  if (fromIso !== undefined) query = query.gte('created_at', fromIso);
+  if (toIso !== undefined) query = query.lte('created_at', toIso);
+
+  const { data: transactions, error: transactionsError } = await query;
+
+  if (transactionsError) {
+    return res.status(500).json({ error: transactionsError.message });
+  }
+
+  res.json(transactions);
 });
 
 // Every transaction across every house the caller personally has an Active
