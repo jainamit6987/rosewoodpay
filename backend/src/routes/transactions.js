@@ -477,20 +477,50 @@ router.get('/pending', authenticate, async (req, res) => {
 // full-society, all-status view. Newest-first, matching every other
 // transaction-listing endpoint in this codebase.
 //
-// All four query filters are optional and combine with AND: ?status=
-// (one exact processing_status), ?house_id= (one house - if it belongs to
-// a different society than the caller administers, the combined query
-// simply returns nothing, never another society's data), ?transaction_type=
-// (one exact type), and ?from=/?to= (an inclusive created_at range).
+// All filters are optional and combine with AND, each independently
+// defaulting to "all": ?status= (one exact processing_status), ?house_id=
+// (one house - if it belongs to a different society than the caller
+// administers, the combined query simply returns nothing, never another
+// society's data), ?transaction_type= (one exact type), ?from=/?to= (an
+// inclusive created_at range), and ?billing_period_id= (one billing
+// period, across every house that isn't already narrowed by ?house_id=).
+// house_id and billing_period_id compose exactly as you'd expect: neither
+// given is the whole society; house_id alone is "every transaction for
+// this house, any period"; billing_period_id alone is "every house's
+// transaction(s) against this one period"; both together is the
+// intersection - deliberately one endpoint instead of three, since S.No 22
+// ("view transactions -- report") and S.No 24 ("view transaction for a
+// billing period") from the workflow doc turned out to be the exact same
+// underlying report with one more optional dimension, not two different
+// features.
+//
+// billing_period_id has no direct column to filter on - transactions never
+// had one after 20260725020000_add_transaction_allocations_and_default_rate
+// dropped it in favor of the transaction_allocations many-to-many join
+// table (a single payment can cover several months, and a single month can
+// in principle be topped up by more than one payment) - so this is the one
+// filter here that has to reach into an embedded resource. PostgREST/
+// supabase-js only turns an embed's `.eq()` into a real filter on the
+// parent rows (not just on which embedded rows show up per parent) when
+// the embed is forced to `!inner`; every other query here keeps the plain
+// left-join embed, since house-less society expenses have zero
+// transaction_allocations rows and must still appear when no billing_period_id
+// filter is requested.
+//
 // Filters on created_at (always set, DEFAULT NOW()) rather than the
 // resident-supplied, optional txn_date - a report filtered by a field that
 // can silently be NULL would just as silently drop real rows.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.get('/report', authenticate, async (req, res) => {
   const supabase = req.supabase;
-  const { status, house_id, transaction_type, from, to } = req.query;
+  const { status, house_id, billing_period_id, transaction_type, from, to } = req.query;
 
   if (status !== undefined && !PROCESSING_STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${PROCESSING_STATUSES.join(', ')}.` });
+  }
+  if (billing_period_id !== undefined && !UUID_PATTERN.test(billing_period_id)) {
+    return res.status(400).json({ error: 'billing_period_id must be a valid UUID.' });
   }
   if (transaction_type !== undefined && !TRANSACTION_TYPES.includes(transaction_type)) {
     return res.status(400).json({ error: `transaction_type must be one of: ${TRANSACTION_TYPES.join(', ')}.` });
@@ -531,16 +561,22 @@ router.get('/report', authenticate, async (req, res) => {
     return res.status(403).json({ error: 'Only an Admin or Committee member can view the transaction report.' });
   }
 
+  // Only switches to an inner join when actually filtering by
+  // billing_period_id - see the comment above for why an unconditional
+  // !inner would silently hide every house-less society expense.
+  const allocationsEmbed = billing_period_id !== undefined ? 'transaction_allocations!inner' : 'transaction_allocations';
+
   let query = supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
     )
     .in('society_id', societyIds)
     .order('created_at', { ascending: false });
 
   if (status !== undefined) query = query.eq('processing_status', status);
   if (house_id !== undefined) query = query.eq('house_id', house_id);
+  if (billing_period_id !== undefined) query = query.eq('transaction_allocations.billing_period_id', billing_period_id);
   if (transaction_type !== undefined) query = query.eq('transaction_type', transaction_type);
   if (fromIso !== undefined) query = query.gte('created_at', fromIso);
   if (toIso !== undefined) query = query.lte('created_at', toIso);

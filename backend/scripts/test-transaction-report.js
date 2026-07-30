@@ -1,10 +1,12 @@
 // Verifies GET /transactions/report (backend/src/routes/transactions.js):
 // Admin/Committee full, all-status, society-wide transaction report with
-// optional status/house_id/transaction_type/from/to filters. Requires the
-// server running (npm run dev) and the seed fixtures from
-// supabase/seed.sql (SEEDTENANTR24PAYMENT, a Submitted Maintenance
-// transaction on R-24; SEEDUTILITYBILL1, an already-Verified UtilityBill
-// expense with no house_id).
+// optional status/house_id/billing_period_id/transaction_type/from/to
+// filters, house_id and billing_period_id composing as an intersection
+// when both are given. Requires the server running (npm run dev) and the
+// seed fixtures from supabase/seed.sql (SEEDTENANTR24PAYMENT, a Submitted
+// Maintenance transaction allocated against R-24's current-month billing
+// period; SEEDUTILITYBILL1, an already-Verified UtilityBill expense with
+// no house_id and no allocations at all).
 // Run with: node scripts/test-transaction-report.js
 require('dotenv').config();
 const env = require('../src/config/env');
@@ -115,6 +117,67 @@ async function main() {
     'a different house_id filter never leaks R-24\'s transactions',
     a101Only.status === 200 && !a101Only.body.some((t) => t.utr_number === 'SEEDTENANTR24PAYMENT'),
     a101Only.body
+  );
+
+  // --- billing_period_id filter: only the transaction(s) allocated
+  //     against R-24's current-month period, across every house (not
+  //     narrowed to R-24 by anything other than the allocation itself) ---
+  const r24PeriodId = seedTenantPayment?.transaction_allocations?.[0]?.billing_period_id;
+  check('setup: found the billing period SEEDTENANTR24PAYMENT is allocated against', !!r24PeriodId, seedTenantPayment);
+
+  const byPeriod = await get(`/transactions/report?billing_period_id=${r24PeriodId}`, adminToken);
+  check(
+    'billing_period_id filter (no house_id) returns SEEDTENANTR24PAYMENT, excludes the allocation-less UtilityBill expense',
+    byPeriod.status === 200 &&
+      byPeriod.body.some((t) => t.utr_number === 'SEEDTENANTR24PAYMENT') &&
+      !byPeriod.body.some((t) => t.utr_number === 'SEEDUTILITYBILL1') &&
+      byPeriod.body.every((t) => t.transaction_allocations.some((a) => a.billing_period_id === r24PeriodId)),
+    byPeriod.body
+  );
+
+  // --- billing_period_id + the matching house_id together: still finds
+  //     it (the intersection is non-empty) ---
+  const byPeriodAndMatchingHouse = await get(
+    `/transactions/report?billing_period_id=${r24PeriodId}&house_id=${HOUSE_R24}`,
+    adminToken
+  );
+  check(
+    'billing_period_id + its own house_id together still returns the transaction (correct intersection)',
+    byPeriodAndMatchingHouse.status === 200 &&
+      byPeriodAndMatchingHouse.body.some((t) => t.utr_number === 'SEEDTENANTR24PAYMENT'),
+    byPeriodAndMatchingHouse.body
+  );
+
+  // --- billing_period_id + an unrelated house_id together: the
+  //     intersection is empty, not an error ---
+  const byPeriodAndWrongHouse = await get(
+    `/transactions/report?billing_period_id=${r24PeriodId}&house_id=${HOUSE_A101_RESIDENT}`,
+    adminToken
+  );
+  check(
+    'billing_period_id + an unrelated house_id together returns an empty intersection, not an error',
+    byPeriodAndWrongHouse.status === 200 && byPeriodAndWrongHouse.body.length === 0,
+    byPeriodAndWrongHouse.body
+  );
+
+  // --- A malformed billing_period_id is rejected before ever reaching the
+  //     database (a raw invalid-UUID query would otherwise surface as a
+  //     confusing 500) ---
+  check(
+    'a malformed billing_period_id is rejected (400)',
+    (await get('/transactions/report?billing_period_id=not-a-uuid', adminToken)).status === 400
+  );
+
+  // --- A well-formed but nonexistent billing_period_id returns an empty
+  //     array, not an error ---
+  const nonexistentPeriod = await get(
+    '/transactions/report?billing_period_id=00000000-1111-2222-3333-444444444444',
+    adminToken
+  );
+  check(
+    'a nonexistent (but well-formed) billing_period_id returns an empty array, not an error',
+    nonexistentPeriod.status === 200 && nonexistentPeriod.body.length === 0,
+    nonexistentPeriod.body
   );
 
   // --- transaction_type filter ---
