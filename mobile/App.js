@@ -9,6 +9,7 @@ import SubmitPaymentScreen from './src/screens/SubmitPaymentScreen';
 import AdminReviewScreen from './src/screens/AdminReviewScreen';
 import ModeChooserScreen from './src/screens/ModeChooserScreen';
 import BillingHistoryScreen from './src/screens/BillingHistoryScreen';
+import MyTransactionsScreen from './src/screens/MyTransactionsScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -23,6 +24,12 @@ import BillingHistoryScreen from './src/screens/BillingHistoryScreen';
 function AuthenticatedApp() {
   const [paymentTarget, setPaymentTarget] = useState(null);
   const [historyTarget, setHistoryTarget] = useState(null);
+  // Boolean, not an object like historyTarget/paymentTarget above - unlike
+  // billing history or a payment, "my transactions" is never scoped to one
+  // house, it already aggregates across every house the caller is assigned
+  // to (see GET /transactions/mine), so there is nothing house-specific to
+  // carry through this state slot.
+  const [showMyTransactions, setShowMyTransactions] = useState(false);
   // null = no explicit choice made yet. Only matters when both resident and
   // admin/committee access are available - see hasResidentAccess/
   // hasAdminAccess below; when only one applies there is nothing to choose
@@ -111,6 +118,10 @@ function AuthenticatedApp() {
     return <BillingHistoryScreen house={historyTarget} onBack={() => setHistoryTarget(null)} />;
   }
 
+  if (showMyTransactions) {
+    return <MyTransactionsScreen onBack={() => setShowMyTransactions(false)} />;
+  }
+
   const effectiveMode = mode || (hasAdminAccess ? 'admin' : 'resident');
 
   if (effectiveMode === 'admin') {
@@ -124,7 +135,14 @@ function AuthenticatedApp() {
   // is the only thing available), this screen is the entire experience.
   // Getting to Admin/Committee from here means logging out and choosing
   // again, not a shortcut on this screen - see the note in DuesScreen.js.
-  return <DuesScreen onPayHouse={setPaymentTarget} onViewHistory={setHistoryTarget} onLogout={logout} />;
+  return (
+    <DuesScreen
+      onPayHouse={setPaymentTarget}
+      onViewHistory={setHistoryTarget}
+      onViewTransactions={() => setShowMyTransactions(true)}
+      onLogout={logout}
+    />
+  );
 }
 
 function RootNavigator() {

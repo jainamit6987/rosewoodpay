@@ -43,7 +43,7 @@ function groupPeriodsByHouse(membership) {
   return houses;
 }
 
-export default function DuesScreen({ onPayHouse, onViewHistory, onLogout }) {
+export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactions, onLogout }) {
   const { accessToken } = useAuth();
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -140,6 +140,10 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onLogout }) {
           <Text style={styles.signOutLink}>Sign out</Text>
         </TouchableOpacity>
       </View>
+
+      <TouchableOpacity onPress={onViewTransactions}>
+        <Text style={styles.transactionsLink}>View all my transactions</Text>
+      </TouchableOpacity>
 
       {housesWithDues.length === 0 && (
         <Text style={styles.subtitle}>No approved house assignments yet - ask an admin to approve one.</Text>
@@ -246,6 +250,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     paddingTop: 4,
+  },
+  transactionsLink: {
+    color: '#1a73e8',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 16,
   },
   card: {
     backgroundColor: '#fff',
