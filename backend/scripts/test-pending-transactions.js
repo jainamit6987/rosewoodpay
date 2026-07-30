@@ -121,6 +121,19 @@ async function main() {
     pending.body
   );
 
+  // --- Each allocation names the actual billing period it covers (not just
+  //     a billing_period_id an admin can't label), via the same nested embed
+  //     through transaction_allocations into billing_periods used by
+  //     GET /transactions/mine - lets an admin see which month(s) a payment
+  //     would settle before deciding to Verify it. ---
+  const firstListing = (pending.body || []).find((t) => t.id === first.body.id);
+  check(
+    'the freshly-submitted transaction\'s allocation names its own billing period\'s period_month',
+    firstListing?.transaction_allocations?.length === 1 &&
+      typeof firstListing.transaction_allocations[0].billing_periods?.period_month === 'string',
+    firstListing
+  );
+
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
   // Cascades to transaction_allocations automatically (ON DELETE CASCADE).

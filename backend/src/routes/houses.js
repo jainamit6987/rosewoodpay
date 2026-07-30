@@ -116,9 +116,39 @@ router.get('/:houseId/billing-periods', authenticate, async (req, res) => {
     return res.status(500).json({ error: periodsError.message });
   }
 
+  // Same hasPendingSubmission flag as GET /me (see routes/me.js for the
+  // full reasoning): a period stays 'Open' right up until a payment against
+  // it is actually Verified, so "Open" alone reads misleadingly here too -
+  // a resident/admin looking at this history should be able to tell "still
+  // genuinely unpaid" apart from "already has a Submitted payment sitting
+  // in the review queue" without that meaning a new billing_periods.status
+  // value (deliberately not done - see Society_App_Progress_Log.md: it
+  // would ripple into the FIFO allocation filter, the pendency report's
+  // "still owed" filter, and the verify handler's own status check, none of
+  // which should change just to relabel this one badge).
+  const periodIds = billingPeriods.map((period) => period.id);
+  let pendingPeriodIds = new Set();
+  if (periodIds.length > 0) {
+    const { data: pendingAllocations, error: pendingError } = await supabase
+      .from('transaction_allocations')
+      .select('billing_period_id, transactions!inner(processing_status)')
+      .in('billing_period_id', periodIds)
+      .eq('transactions.processing_status', 'Submitted');
+
+    if (pendingError) {
+      return res.status(500).json({ error: pendingError.message });
+    }
+    pendingPeriodIds = new Set((pendingAllocations || []).map((allocation) => allocation.billing_period_id));
+  }
+
   // Same as above: an empty array is the normal outcome for a resident with
   // no visible assignment to this house, not an error condition.
-  res.json(billingPeriods);
+  res.json(
+    billingPeriods.map((period) => ({
+      ...period,
+      hasPendingSubmission: pendingPeriodIds.has(period.id),
+    }))
+  );
 });
 
 // Admin-only: directly creates the next `months` sequential billing

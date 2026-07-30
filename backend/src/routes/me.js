@@ -71,7 +71,40 @@ router.get('/', authenticate, async (req, res) => {
       if (periodsError) {
         return res.status(500).json({ error: periodsError.message });
       }
-      billingPeriods = periods;
+
+      // A period stays 'Open' right up until a Verified payment covers it -
+      // so an Open period can already have a real payment sitting against
+      // it, just not yet reviewed (see the close-on-verify logic in
+      // routes/transactions.js's verify handler). Flag those here so the
+      // mobile dues screen can grey them out rather than letting a resident
+      // pay the same period twice while the first payment is still awaiting
+      // an Admin's decision - FIFO would otherwise auto-allocate a second
+      // payment to that exact same period. Only 'Submitted' is checked, not
+      // the full processing_status list, since nothing in this codebase's
+      // actual submission flow ever produces the other in-between OCR-
+      // pipeline values (Queued/Processing/etc - see chk_processing_status);
+      // Verified periods never reach here (status flips to 'Closed'), and
+      // Rejected/Failed ones leave the period exactly as unpaid as before,
+      // so there is nothing to flag for either of those.
+      const periodIds = periods.map((period) => period.id);
+      let pendingPeriodIds = new Set();
+      if (periodIds.length > 0) {
+        const { data: pendingAllocations, error: pendingError } = await supabase
+          .from('transaction_allocations')
+          .select('billing_period_id, transactions!inner(processing_status)')
+          .in('billing_period_id', periodIds)
+          .eq('transactions.processing_status', 'Submitted');
+
+        if (pendingError) {
+          return res.status(500).json({ error: pendingError.message });
+        }
+        pendingPeriodIds = new Set((pendingAllocations || []).map((allocation) => allocation.billing_period_id));
+      }
+
+      billingPeriods = periods.map((period) => ({
+        ...period,
+        hasPendingSubmission: pendingPeriodIds.has(period.id),
+      }));
     }
 
     entry.houseAssignments = assignments;

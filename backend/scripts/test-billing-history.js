@@ -10,8 +10,11 @@
 require('dotenv').config();
 const env = require('../src/config/env');
 const { supabaseAnon } = require('../src/config/supabaseClient');
+const supabaseAdmin = require('../src/config/supabaseAdmin');
 
 const BASE_URL = `http://localhost:${env.port}`;
+const SOCIETY_ID = '00000003-0000-0000-0000-000000000003';
+const RESIDENT_MEMBER_ID = '00000005-0000-0000-0000-000000000005';
 const HOUSE_C303_ARREARS = '0000000f-0000-0000-0000-00000000000f';
 const HOUSE_A101_RESIDENT = '00000006-0000-0000-0000-000000000006';
 const FAKE_HOUSE_ID = '00000000-aaaa-bbbb-cccc-000000000000';
@@ -38,6 +41,15 @@ async function loginToken(email, password) {
 async function get(path, token) {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+async function post(path, token, body) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body || {}),
   });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
@@ -105,7 +117,80 @@ async function main() {
     adminView.body
   );
 
+  // --- hasPendingSubmission: an Open period with a Submitted (not yet
+  //     Verified/Rejected) payment against it is flagged here too, same as
+  //     GET /me - see routes/houses.js. Uses an isolated throwaway house
+  //     (not the real seeded ones above) so this doesn't depend on, or
+  //     disturb, any of their real fixture state. ---
+  const throwawayTag = `TESTBILLHIST${Date.now()}`.slice(0, 20);
+  const { data: throwawayHouse } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: throwawayTag, type: 'Flat', default_monthly_amount: 2200 })
+    .select('id')
+    .single();
+  await supabaseAdmin.from('resident_house_assignments').insert({
+    society_member_id: RESIDENT_MEMBER_ID,
+    house_id: throwawayHouse.id,
+    status: 'Active',
+    approved_at: new Date().toISOString(),
+  });
+  const currentMonth = new Date();
+  const periodMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth(), 1))
+    .toISOString()
+    .slice(0, 10);
+  await supabaseAdmin.from('billing_periods').insert({
+    society_id: SOCIETY_ID,
+    house_id: throwawayHouse.id,
+    period_month: periodMonth,
+    base_amount: 2200,
+    amount_due: 2200,
+    status: 'Open',
+  });
+
+  const beforePayment = await get(`/houses/${throwawayHouse.id}/billing-periods`, residentToken);
+  check(
+    'before any payment, hasPendingSubmission is false',
+    beforePayment.status === 200 && beforePayment.body?.[0]?.hasPendingSubmission === false,
+    beforePayment.body
+  );
+
+  const testUtr = `TESTBILLHIST${Date.now()}`;
+  const payment = await post('/transactions', residentToken, {
+    house_id: throwawayHouse.id,
+    amount: 2200,
+    utr_number: testUtr,
+  });
+  check('setup: payment against the throwaway period submitted (201)', payment.status === 201, payment.body);
+
+  const afterSubmit = await get(`/houses/${throwawayHouse.id}/billing-periods`, residentToken);
+  check(
+    'once Submitted, hasPendingSubmission flips true (status itself stays "Open", not a new value)',
+    afterSubmit.status === 200 &&
+      afterSubmit.body?.[0]?.hasPendingSubmission === true &&
+      afterSubmit.body?.[0]?.status === 'Open',
+    afterSubmit.body
+  );
+
+  const reject = await post(`/transactions/${payment.body.id}/reject`, adminToken, {
+    reason: 'test-billing-history cleanup',
+  });
+  check('setup: that payment is rejected (200)', reject.status === 200, reject.body);
+
+  const afterReject = await get(`/houses/${throwawayHouse.id}/billing-periods`, residentToken);
+  check(
+    'once Rejected, hasPendingSubmission flips back to false',
+    afterReject.status === 200 && afterReject.body?.[0]?.hasPendingSubmission === false,
+    afterReject.body
+  );
+
   console.log(`\n${passCount} passed, ${failCount} failed.`);
+
+  // Delete the transaction before the house - see test-me-pending-submission
+  // .js for why the order matters (transaction_allocations.billing_period_id
+  // is ON DELETE RESTRICT).
+  await supabaseAdmin.from('transactions').delete().like('utr_number', 'TESTBILLHIST%');
+  await supabaseAdmin.from('houses').delete().eq('id', throwawayHouse.id);
+
   process.exit(failCount > 0 ? 1 : 0);
 }
 

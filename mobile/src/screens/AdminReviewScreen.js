@@ -20,15 +20,25 @@ function formatDate(value) {
   return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-// Backend/src/routes/transactions.js's GET /transactions/pending returns
-// each transaction's own allocations, but not the billing periods' own
-// period_month - a count is enough context here ("covers 3 period(s)"),
-// full month-by-month breakdown is what GET /houses/:houseId/transactions
-// is for, not this at-a-glance review queue.
+function formatMonth(periodMonth) {
+  return new Date(periodMonth).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+}
+
+// Same as MyTransactionsScreen's own describeAllocations - names the actual
+// month(s) this payment was allocated to via GET /transactions/pending's
+// nested transaction_allocations -> billing_periods embed, not just a bare
+// count, so an admin reviewing a payment can see at a glance which specific
+// months it would settle before deciding to Verify it. Sorted oldest-first
+// to match the FIFO order routes/transactions.js actually applies in.
 function describeAllocations(transaction) {
-  const count = (transaction.transaction_allocations || []).length;
-  if (count === 0) return 'No allocations recorded';
-  return count === 1 ? 'Covers 1 billing period' : `Covers ${count} billing periods`;
+  const allocations = transaction.transaction_allocations || [];
+  if (allocations.length === 0) return 'No allocations recorded';
+  const months = allocations
+    .map((a) => a.billing_periods?.period_month)
+    .filter(Boolean)
+    .sort()
+    .map(formatMonth);
+  return `Covers: ${months.join(', ')}`;
 }
 
 export default function AdminReviewScreen({ onBack, onLogout }) {

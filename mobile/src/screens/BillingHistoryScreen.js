@@ -21,18 +21,31 @@ function formatMoney(amount) {
 
 // Kept in sync with the chk_billing_status CHECK constraint (Open / Closed /
 // Waived) - anything unrecognized falls back to a neutral gray badge rather
-// than crashing on an unexpected value.
-function statusBadgeStyle(status) {
-  if (status === 'Open') return styles.badgeOpen;
-  if (status === 'Closed') return styles.badgeClosed;
-  if (status === 'Waived') return styles.badgeWaived;
+// than crashing on an unexpected value. "Pending Approval" is not a real
+// status value - a period stays 'Open' in the database right up until a
+// payment against it is actually Verified (see GET /houses/:houseId/billing
+// -periods' hasPendingSubmission flag), so an Open period that already has
+// a Submitted payment sitting in the review queue is relabeled here purely
+// for display, using its own badge color, without pretending it's some
+// fourth database status.
+function displayStatus(period) {
+  if (period.status === 'Open' && period.hasPendingSubmission) return 'Pending Approval';
+  return period.status;
+}
+
+function statusBadgeStyle(period) {
+  if (period.status === 'Open' && period.hasPendingSubmission) return styles.badgePending;
+  if (period.status === 'Open') return styles.badgeOpen;
+  if (period.status === 'Closed') return styles.badgeClosed;
+  if (period.status === 'Waived') return styles.badgeWaived;
   return styles.badgeUnknown;
 }
 
-function statusTextStyle(status) {
-  if (status === 'Open') return styles.badgeTextOpen;
-  if (status === 'Closed') return styles.badgeTextClosed;
-  if (status === 'Waived') return styles.badgeTextWaived;
+function statusTextStyle(period) {
+  if (period.status === 'Open' && period.hasPendingSubmission) return styles.badgeTextPending;
+  if (period.status === 'Open') return styles.badgeTextOpen;
+  if (period.status === 'Closed') return styles.badgeTextClosed;
+  if (period.status === 'Waived') return styles.badgeTextWaived;
   return styles.badgeTextUnknown;
 }
 
@@ -103,8 +116,8 @@ export default function BillingHistoryScreen({ house, onBack }) {
             <View key={period.id} style={styles.periodRow}>
               <View style={styles.periodRowLeft}>
                 <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
-                <View style={[styles.badge, statusBadgeStyle(period.status)]}>
-                  <Text style={[styles.badgeText, statusTextStyle(period.status)]}>{period.status}</Text>
+                <View style={[styles.badge, statusBadgeStyle(period)]}>
+                  <Text style={[styles.badgeText, statusTextStyle(period)]}>{displayStatus(period)}</Text>
                 </View>
               </View>
               <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
@@ -200,6 +213,12 @@ const styles = StyleSheet.create({
   },
   badgeTextOpen: {
     color: '#1a73e8',
+  },
+  badgePending: {
+    backgroundColor: '#fdf2d0',
+  },
+  badgeTextPending: {
+    color: '#8a6d00',
   },
   badgeClosed: {
     backgroundColor: '#e6f4ea',

@@ -454,7 +454,7 @@ router.get('/pending', authenticate, async (req, res) => {
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated)'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')

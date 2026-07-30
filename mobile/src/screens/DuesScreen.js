@@ -163,50 +163,86 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
           {entry.periods.length === 0 ? (
             <Text style={styles.paidUp}>All caught up - no open dues.</Text>
           ) : (
-            <>
-              <Text style={styles.selectHint}>Tap a month to select it and every open month above it</Text>
-              {entry.periods.map((period, index) => {
-                const selectedCount = getSelectedCount(entry.house.id, entry.periods.length);
-                const isSelected = index < selectedCount;
-                return (
-                  <TouchableOpacity
-                    key={period.id}
-                    style={[styles.periodRow, isSelected && styles.periodRowSelected]}
-                    onPress={() => handleSelectThrough(entry.house.id, entry.periods.length, index)}
-                  >
-                    <View style={styles.periodRowLeft}>
-                      <View style={[styles.checkbox, isSelected && styles.checkboxChecked]}>
-                        {isSelected ? <Text style={styles.checkboxTick}>✓</Text> : null}
-                      </View>
-                      <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
-                    </View>
-                    <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-              {(() => {
-                const selectedCount = getSelectedCount(entry.house.id, entry.periods.length);
-                const selectedPeriods = entry.periods.slice(0, selectedCount);
-                const selectedTotal = selectedPeriods.reduce((sum, p) => sum + Number(p.amount_due), 0);
-                return (
-                  <TouchableOpacity
-                    style={styles.payButton}
-                    onPress={() =>
-                      onPayHouse({
-                        house: entry.house,
-                        society: membership.society,
-                        selectedPeriods,
-                      })
+            (() => {
+              // A period already has a Submitted (not yet Verified/Rejected)
+              // payment against it stays 'Open' the whole time it's awaiting
+              // review - see backend/src/routes/me.js's hasPendingSubmission.
+              // It must not be offered for selection here: the backend's
+              // FIFO allocation always targets the oldest Open period, so a
+              // second payment while the first is still pending would
+              // silently double up on that exact same month instead of
+              // moving on to the next one. Since payments are always FIFO,
+              // these blocked periods are always a leading run - selection
+              // below operates purely on the remaining, genuinely payable
+              // suffix.
+              const selectablePeriods = entry.periods.filter((period) => !period.hasPendingSubmission);
+              const selectedCount = getSelectedCount(entry.house.id, selectablePeriods.length);
+              const selectedPeriods = selectablePeriods.slice(0, selectedCount);
+              const selectedTotal = selectedPeriods.reduce((sum, p) => sum + Number(p.amount_due), 0);
+
+              return (
+                <>
+                  {selectablePeriods.length > 0 && (
+                    <Text style={styles.selectHint}>Tap a month to select it and every open month above it</Text>
+                  )}
+                  {entry.periods.map((period) => {
+                    if (period.hasPendingSubmission) {
+                      return (
+                        <View key={period.id} style={[styles.periodRow, styles.periodRowPending]}>
+                          <View style={styles.periodRowLeft}>
+                            <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
+                            <View style={styles.pendingBadge}>
+                              <Text style={styles.pendingBadgeText}>Awaiting review</Text>
+                            </View>
+                          </View>
+                          <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
+                        </View>
+                      );
                     }
-                  >
-                    <Text style={styles.payButtonText}>
-                      Pay {formatMoney(selectedTotal)} ({selectedPeriods.length} month
-                      {selectedPeriods.length === 1 ? '' : 's'})
+
+                    const selectableIndex = selectablePeriods.indexOf(period);
+                    const isSelected = selectableIndex < selectedCount;
+                    return (
+                      <TouchableOpacity
+                        key={period.id}
+                        style={[styles.periodRow, isSelected && styles.periodRowSelected]}
+                        onPress={() => handleSelectThrough(entry.house.id, selectablePeriods.length, selectableIndex)}
+                      >
+                        <View style={styles.periodRowLeft}>
+                          <View style={[styles.checkbox, isSelected && styles.checkboxChecked]}>
+                            {isSelected ? <Text style={styles.checkboxTick}>✓</Text> : null}
+                          </View>
+                          <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
+                        </View>
+                        <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {selectablePeriods.length === 0 ? (
+                    <Text style={styles.pendingHint}>
+                      A payment for {entry.periods.length === 1 ? 'this month' : 'these months'} has already been
+                      submitted and is awaiting admin review.
                     </Text>
-                  </TouchableOpacity>
-                );
-              })()}
-            </>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.payButton}
+                      onPress={() =>
+                        onPayHouse({
+                          house: entry.house,
+                          society: membership.society,
+                          selectedPeriods,
+                        })
+                      }
+                    >
+                      <Text style={styles.payButtonText}>
+                        Pay {formatMoney(selectedTotal)} ({selectedPeriods.length} month
+                        {selectedPeriods.length === 1 ? '' : 's'})
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </>
+              );
+            })()
           )}
         </View>
       ))}
@@ -312,10 +348,29 @@ const styles = StyleSheet.create({
   periodRowSelected: {
     backgroundColor: '#e8f0fe',
   },
+  periodRowPending: {
+    backgroundColor: '#f5f5f7',
+  },
   periodRowLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+  },
+  pendingBadge: {
+    backgroundColor: '#fdf2d0',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  pendingBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#8a6d00',
+  },
+  pendingHint: {
+    fontSize: 12,
+    color: '#8a6d00',
+    marginTop: 4,
   },
   checkbox: {
     width: 18,
