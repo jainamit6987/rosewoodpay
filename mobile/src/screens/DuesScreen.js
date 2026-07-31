@@ -43,9 +43,30 @@ function groupPeriodsByHouse(membership) {
   return houses;
 }
 
-export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactions, onLogout }) {
+// Two ways to reach this screen, sharing the exact same period-selection UI
+// below - only how "which periods are open, for which house" gets loaded
+// differs:
+//   1. Resident paying their own dues: pass houseId. Sourced from GET /me,
+//      which only ever describes the *caller's own* house assignments -
+//      the resident dashboard (ResidentHomeScreen) owns picking which house
+//      first (see App.js).
+//   2. Admin recording a Cash payment for a house that is not necessarily
+//      their own (see HouseDashboardScreen's "Submit Cash Payment"): pass
+//      cashForHouse (that house's own object) instead. Sourced from GET
+//      /houses/:houseId/billing-periods - the same house-scoped endpoint
+//      BillingHistoryScreen already uses, which any Admin/Committee member
+//      of the society can call for any house in it, unlike /me. The user
+//      flagged a real gap in the first cut of Cash payments: with no
+//      period breakdown shown, an Admin submitting one had no way to see
+//      what it would actually cover before an auto-Verified transaction
+//      (no later review step to catch a mistake) went through - reusing
+//      this exact screen, rather than a plain amount box, closes that gap
+//      by construction instead of duplicating the selection logic.
+export default function DuesScreen({ houseId, cashForHouse, onPayHouse, onBack }) {
   const { accessToken } = useAuth();
+  const isCashMode = !!cashForHouse;
   const [me, setMe] = useState(null);
+  const [cashHousePeriods, setCashHousePeriods] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -60,12 +81,17 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
   const load = useCallback(async () => {
     try {
       setError(null);
-      const data = await apiGet('/me', accessToken);
-      setMe(data);
+      if (isCashMode) {
+        const periods = await apiGet(`/houses/${cashForHouse.id}/billing-periods`, accessToken);
+        setCashHousePeriods(periods);
+      } else {
+        const data = await apiGet('/me', accessToken);
+        setMe(data);
+      }
     } catch (err) {
       setError(err.message);
     }
-  }, [accessToken]);
+  }, [accessToken, isCashMode, cashForHouse?.id]);
 
   useEffect(() => {
     load().finally(() => setLoading(false));
@@ -87,7 +113,7 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
 
   const membership = me?.memberships?.[0];
 
-  if (error || !membership) {
+  if (error || (!isCashMode && !membership)) {
     return (
       <View style={styles.centered}>
         <Text style={styles.error}>{error || 'No society membership found for this account.'}</Text>
@@ -98,15 +124,34 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
     );
   }
 
-  // Personal dues are shown for ANY member with at least one house
-  // assignment - is_admin/is_committee_member are independent capability
-  // flags, not an exclusive alternative to being a resident (see
-  // backend/src/routes/me.js). This screen deliberately shows nothing
-  // about admin/committee capability at all: once a member has chosen to
-  // act as a Resident (see App.js's mode chooser), they see exactly what
-  // a plain resident sees, full stop - switching back to Admin/Committee
-  // is a log-out-and-choose-again action, not a shortcut sitting here.
-  const housesWithDues = groupPeriodsByHouse(membership);
+  // Same shape either way - { house, relationshipType, periods } - so every
+  // render below stays branch-free. Cash mode has no "relationship" (an
+  // Admin recording someone else's cash isn't a resident of that house) and
+  // sources its (already-loaded) periods straight from the house-scoped
+  // endpoint rather than /me, oldest-open-first to match the FIFO selection
+  // logic below (the endpoint itself is newest-first, for history display).
+  const entry = isCashMode
+    ? {
+        house: cashForHouse,
+        relationshipType: null,
+        periods: (cashHousePeriods || [])
+          .filter((period) => period.status === 'Open')
+          .sort((a, b) => new Date(a.period_month) - new Date(b.period_month)),
+      }
+    : groupPeriodsByHouse(membership).find((candidate) => candidate.house?.id === houseId);
+
+  if (!entry) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.error}>This house assignment could not be found.</Text>
+        {onBack ? (
+          <TouchableOpacity style={styles.retryButton} onPress={onBack}>
+            <Text style={styles.retryButtonText}>Back</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    );
+  }
 
   const getSelectedCount = (houseId, periodCount) => {
     const count = selectedCounts[houseId] ?? 1;
@@ -131,36 +176,19 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
       contentContainerStyle={styles.content}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
     >
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.title}>{membership.society?.name}</Text>
-          <Text style={styles.subtitle}>Total outstanding: {formatMoney(membership.totalOutstanding)}</Text>
-        </View>
-        <TouchableOpacity onPress={onLogout}>
-          <Text style={styles.signOutLink}>Sign out</Text>
+      {onBack ? (
+        <TouchableOpacity style={styles.backLink} onPress={onBack}>
+          <Text style={styles.backLinkText}>← Back</Text>
         </TouchableOpacity>
-      </View>
+      ) : null}
 
-      <TouchableOpacity onPress={onViewTransactions}>
-        <Text style={styles.transactionsLink}>View all my transactions</Text>
-      </TouchableOpacity>
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.houseNumber}>{entry.house?.house_number}</Text>
+          <Text style={styles.relationshipTag}>{isCashMode ? 'Cash payment' : entry.relationshipType}</Text>
+        </View>
 
-      {housesWithDues.length === 0 && (
-        <Text style={styles.subtitle}>No approved house assignments yet - ask an admin to approve one.</Text>
-      )}
-
-      {housesWithDues.map((entry) => (
-        <View key={entry.house?.id} style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Text style={styles.houseNumber}>{entry.house?.house_number}</Text>
-            <Text style={styles.relationshipTag}>{entry.relationshipType}</Text>
-          </View>
-
-          <TouchableOpacity onPress={() => onViewHistory(entry.house)}>
-            <Text style={styles.historyLink}>View full billing history</Text>
-          </TouchableOpacity>
-
-          {entry.periods.length === 0 ? (
+        {entry.periods.length === 0 ? (
             <Text style={styles.paidUp}>All caught up - no open dues.</Text>
           ) : (
             (() => {
@@ -227,11 +255,11 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
                     <TouchableOpacity
                       style={styles.payButton}
                       onPress={() =>
-                        onPayHouse({
-                          house: entry.house,
-                          society: membership.society,
-                          selectedPeriods,
-                        })
+                        onPayHouse(
+                          isCashMode
+                            ? { house: entry.house, selectedPeriods, paymentMode: 'Cash' }
+                            : { house: entry.house, society: membership.society, selectedPeriods }
+                        )
                       }
                     >
                       <Text style={styles.payButtonText}>
@@ -244,8 +272,7 @@ export default function DuesScreen({ onPayHouse, onViewHistory, onViewTransactio
               );
             })()
           )}
-        </View>
-      ))}
+      </View>
     </ScrollView>
   );
 }
@@ -266,32 +293,19 @@ const styles = StyleSheet.create({
     padding: 24,
     gap: 16,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 20,
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: '700',
-  },
   subtitle: {
     fontSize: 14,
     color: '#555',
     marginTop: 4,
     textAlign: 'center',
   },
-  signOutLink: {
+  backLink: {
+    marginBottom: 16,
+  },
+  backLinkText: {
     color: '#1a73e8',
     fontSize: 14,
     fontWeight: '600',
-    paddingTop: 4,
-  },
-  transactionsLink: {
-    color: '#1a73e8',
-    fontSize: 13,
-    fontWeight: '600',
-    marginBottom: 16,
   },
   card: {
     backgroundColor: '#fff',
@@ -323,12 +337,6 @@ const styles = StyleSheet.create({
   paidUp: {
     fontSize: 14,
     color: '#2e7d32',
-  },
-  historyLink: {
-    fontSize: 12,
-    color: '#1a73e8',
-    fontWeight: '600',
-    marginBottom: 10,
   },
   selectHint: {
     fontSize: 12,

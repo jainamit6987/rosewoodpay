@@ -115,13 +115,13 @@ async function main() {
   // two throwaway houses in the real society, plus an entirely separate
   // throwaway society (with its own house and member) to exercise the
   // cross-society validation paths without touching the real fixtures. ---
-  const memberResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: memberEmail, password: memberPassword });
+  const memberResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: memberEmail, name: 'Test Member', password: memberPassword });
   check('setup: created a throwaway Active member', memberResult.status === 201, memberResult.body);
   const memberId = memberResult.body.id;
   createdMemberIds.push(memberId);
   createdAuthUserIds.push(memberResult.body.auth_user_id);
 
-  const suspendedResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: suspendedEmail, password: suspendedPassword });
+  const suspendedResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: suspendedEmail, name: 'Test Suspended', password: suspendedPassword });
   const suspendedMemberId = suspendedResult.body.id;
   createdMemberIds.push(suspendedMemberId);
   createdAuthUserIds.push(suspendedResult.body.auth_user_id);
@@ -324,7 +324,28 @@ async function main() {
     (await post(`/assignments/${approvedAssignment1Id}/reassign`, adminToken, { house_id: house1.id, society_member_id: memberId, relationship_type: 'Owner' })).status === 400
   );
 
-  // --- POST /assignments/:id/reassign happy path: move to a different house ---
+  // --- POST /assignments/:id/reassign happy path: move to a different
+  // house. approvedAssignment1Id is house1's only Active Owner - without
+  // a co-owner already on house1, the new last-Owner guard would block
+  // moving it away (proven in its own dedicated section below), so this
+  // needs a throwaway co-owner fixture on house1 first purely to unblock
+  // it here (a genuinely different member - the unique-per-member-house
+  // index means memberId itself can't hold a second Active row on
+  // house1); the guard's own behavior is exercised separately, in isolation. ---
+  const house1CoOwnerResult = await post('/members', adminToken, {
+    society_id: SOCIETY_ID,
+    email: `${testTag.toLowerCase()}house1coowner@example.com`,
+    name: 'House1 Co-Owner',
+    password: memberPassword,
+  });
+  const house1CoOwnerMemberId = house1CoOwnerResult.body.id;
+  createdMemberIds.push(house1CoOwnerMemberId);
+  createdAuthUserIds.push(house1CoOwnerResult.body.auth_user_id);
+  const { error: house1CoOwnerError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: house1CoOwnerMemberId, house_id: house1.id, relationship_type: 'Owner', status: 'Active', approved_at: new Date().toISOString() });
+  if (house1CoOwnerError) throw new Error(`setup house1CoOwner insert failed: ${house1CoOwnerError.message}`);
+
   const reassignResult = await post(`/assignments/${approvedAssignment1Id}/reassign`, adminToken, { house_id: house2.id });
   check(
     'reassigning to a different house succeeds (200): new row is Active with approver set immediately, no separate approve needed',
@@ -353,7 +374,25 @@ async function main() {
     reassignAuditRows
   );
 
-  // --- Reassign again, changing only relationship_type (same house/member) ---
+  // --- Reassign again, changing only relationship_type (same house/
+  // member): reassignedAssignmentId is now house2's only Active Owner, so
+  // moving it from Owner to Tenant leaves house2 without one unless a
+  // co-owner backstops it first - same guard, same fixture pattern as
+  // house1CoOwner above. ---
+  const house2CoOwnerResult = await post('/members', adminToken, {
+    society_id: SOCIETY_ID,
+    email: `${testTag.toLowerCase()}house2coowner@example.com`,
+    name: 'House2 Co-Owner',
+    password: memberPassword,
+  });
+  const house2CoOwnerMemberId = house2CoOwnerResult.body.id;
+  createdMemberIds.push(house2CoOwnerMemberId);
+  createdAuthUserIds.push(house2CoOwnerResult.body.auth_user_id);
+  const { error: house2CoOwnerError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: house2CoOwnerMemberId, house_id: house2.id, relationship_type: 'Owner', status: 'Active', approved_at: new Date().toISOString() });
+  if (house2CoOwnerError) throw new Error(`setup house2CoOwner insert failed: ${house2CoOwnerError.message}`);
+
   const reassignRelationshipResult = await post(`/assignments/${reassignedAssignmentId}/reassign`, adminToken, { relationship_type: 'Tenant' });
   check(
     'reassigning to change only relationship_type succeeds (200)',
@@ -371,6 +410,105 @@ async function main() {
     activeListFinal.status === 200 && (activeListFinal.body || []).some((a) => a.id === finalAssignmentId && a.relationshipType === 'Tenant')
   );
 
+  // --- Last-Owner guard, in isolation: a house must always have an
+  // Active Owner of record. Own throwaway houses/members, untangled from
+  // the reassign-mechanics flow above. ---
+  const { data: guardHouse1, error: guardHouse1Error } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `G1-${houseTag}`, type: 'Flat', default_monthly_amount: 1000 })
+    .select()
+    .single();
+  if (guardHouse1Error) throw new Error(`setup guardHouse1 insert failed: ${guardHouse1Error.message}`);
+  const { data: guardHouse2, error: guardHouse2Error } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `G2-${houseTag}`, type: 'Flat', default_monthly_amount: 1000 })
+    .select()
+    .single();
+  if (guardHouse2Error) throw new Error(`setup guardHouse2 insert failed: ${guardHouse2Error.message}`);
+
+  const ownerAResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: `${testTag.toLowerCase()}ownera@example.com`, name: 'Owner A', password: memberPassword });
+  const ownerAId = ownerAResult.body.id;
+  createdMemberIds.push(ownerAId);
+  createdAuthUserIds.push(ownerAResult.body.auth_user_id);
+
+  const ownerBResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: `${testTag.toLowerCase()}ownerb@example.com`, name: 'Owner B', password: memberPassword });
+  const ownerBId = ownerBResult.body.id;
+  createdMemberIds.push(ownerBId);
+  createdAuthUserIds.push(ownerBResult.body.auth_user_id);
+
+  const { data: soleOwnerAssignment, error: soleOwnerError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: ownerAId, house_id: guardHouse1.id, relationship_type: 'Owner', status: 'Active', approved_at: new Date().toISOString() })
+    .select()
+    .single();
+  if (soleOwnerError) throw new Error(`setup soleOwnerAssignment insert failed: ${soleOwnerError.message}`);
+
+  const revokeSoleOwnerBlocked = await post(`/assignments/${soleOwnerAssignment.id}/revoke`, adminToken);
+  check(
+    "revoking a house's ONLY Active Owner is blocked (409) with no replacement",
+    revokeSoleOwnerBlocked.status === 409 && /Owner/i.test(revokeSoleOwnerBlocked.body.error || ''),
+    revokeSoleOwnerBlocked
+  );
+
+  const reassignSoleOwnerAwayBlocked = await post(`/assignments/${soleOwnerAssignment.id}/reassign`, adminToken, { house_id: guardHouse2.id });
+  check(
+    "reassigning a house's ONLY Active Owner to a different house is blocked (409) with no replacement left behind",
+    reassignSoleOwnerAwayBlocked.status === 409 && /Owner/i.test(reassignSoleOwnerAwayBlocked.body.error || ''),
+    reassignSoleOwnerAwayBlocked
+  );
+
+  // Same-house Owner-to-Owner member swap IS allowed - the new row is its
+  // own replacement, so guardHouse1 is never actually left ownerless.
+  const swapOwnerResult = await post(`/assignments/${soleOwnerAssignment.id}/reassign`, adminToken, { society_member_id: ownerBId });
+  check(
+    'reassigning the sole Owner to a different member on the SAME house succeeds (200) - the new row is its own replacement',
+    swapOwnerResult.status === 200 &&
+      swapOwnerResult.body.assignment.status === 'Active' &&
+      swapOwnerResult.body.assignment.relationship_type === 'Owner' &&
+      swapOwnerResult.body.assignment.society_member_id === ownerBId,
+    swapOwnerResult.body
+  );
+  const swappedOwnerAssignmentId = swapOwnerResult.body.assignment.id;
+
+  // Add a genuine second Owner alongside it, then prove revoking either
+  // one now succeeds while the other remains.
+  const { data: coOwnerAssignment, error: coOwnerError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: ownerAId, house_id: guardHouse1.id, relationship_type: 'Owner', status: 'Active', approved_at: new Date().toISOString() })
+    .select()
+    .single();
+  if (coOwnerError) throw new Error(`setup coOwnerAssignment insert failed: ${coOwnerError.message}`);
+
+  const revokeWithCoOwnerSucceeds = await post(`/assignments/${swappedOwnerAssignmentId}/revoke`, adminToken);
+  check(
+    'once a co-owner exists, revoking the other Active Owner now succeeds (200)',
+    revokeWithCoOwnerSucceeds.status === 200 && revokeWithCoOwnerSucceeds.body.status === 'Revoked',
+    revokeWithCoOwnerSucceeds.body
+  );
+
+  // ...which leaves coOwnerAssignment as guardHouse1's sole Owner again -
+  // blocked once more, proving the check is re-evaluated live each time,
+  // not cached from the earlier "a co-owner exists" state.
+  const revokeLastOwnerBlockedAgain = await post(`/assignments/${coOwnerAssignment.id}/revoke`, adminToken);
+  check(
+    'with the co-owner now gone, revoking the last remaining Owner is blocked (409) again',
+    revokeLastOwnerBlockedAgain.status === 409,
+    revokeLastOwnerBlockedAgain
+  );
+
+  // A Tenant/Occupant assignment is never subject to this guard at all,
+  // even as a house's only assignment of any kind.
+  const soleTenantResult = await post('/assignments', adminToken, { society_id: SOCIETY_ID, society_member_id: memberId, house_id: guardHouse2.id, relationship_type: 'Tenant' });
+  const soleTenantId = soleTenantResult.body.id;
+  const approveSoleTenant = await post(`/assignments/${soleTenantId}/approve`, adminToken);
+  check('setup: a sole Tenant assignment on guardHouse2 is created and approved', approveSoleTenant.status === 200, approveSoleTenant.body);
+  const revokeSoleTenant = await post(`/assignments/${soleTenantId}/revoke`, adminToken);
+  check(
+    "revoking a house's only Tenant assignment is unaffected by the Owner-only guard (200)",
+    revokeSoleTenant.status === 200 && revokeSoleTenant.body.status === 'Revoked',
+    revokeSoleTenant.body
+  );
+
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
   // --- Cleanup ---
@@ -386,7 +524,7 @@ async function main() {
     const { error: cleanupSociety2Error } = await supabaseAdmin.from('societies').delete().eq('id', society2Id);
     if (cleanupSociety2Error) console.error('cleanup: deleting society2 failed:', cleanupSociety2Error.message);
   }
-  const { error: cleanupHousesError } = await supabaseAdmin.from('houses').delete().in('id', [house1.id, house2.id]);
+  const { error: cleanupHousesError } = await supabaseAdmin.from('houses').delete().in('id', [house1.id, house2.id, guardHouse1.id, guardHouse2.id]);
   if (cleanupHousesError) console.error('cleanup: deleting houses failed:', cleanupHousesError.message);
 
   if (createdMemberIds.length > 0) {

@@ -16,7 +16,7 @@ router.get('/', authenticate, async (req, res) => {
   // endpoint *should* return.
   const { data: memberships, error: membershipError } = await supabase
     .from('society_members')
-    .select('id, society_id, is_admin, is_committee_member, status, phone_number, societies(name, upi_vpa, upi_payee_name)')
+    .select('id, society_id, is_admin, is_committee_member, status, phone_number, societies(id, name, upi_vpa, upi_payee_name)')
     .eq('auth_user_id', req.user.id);
 
   if (membershipError) {
@@ -46,7 +46,7 @@ router.get('/', authenticate, async (req, res) => {
     // same as always. This block now always runs.
     const { data: assignments, error: assignmentError } = await supabase
       .from('resident_house_assignments')
-      .select('id, relationship_type, status, houses(id, house_number, type, status)')
+      .select('id, relationship_type, status, houses(id, house_number, type, status, owner_name)')
       .eq('society_member_id', membership.id)
       .eq('status', 'Active');
 
@@ -55,6 +55,59 @@ router.get('/', authenticate, async (req, res) => {
     }
 
     const houseIds = assignments.map((a) => a.houses?.id).filter(Boolean);
+
+    // "Current billing period" for the resident dashboard means this
+    // calendar month's own period, whatever its status - distinct from the
+    // open-periods arrears list below. Null if this month's period hasn't
+    // been generated yet.
+    let currentPeriodByHouse = new Map();
+    if (houseIds.length > 0) {
+      const now = new Date();
+      const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      const { data: currentPeriods, error: currentPeriodError } = await supabase
+        .from('billing_periods')
+        .select('id, house_id, period_month, amount_due, status')
+        .in('house_id', houseIds)
+        .eq('period_month', currentMonthStart);
+
+      if (currentPeriodError) {
+        return res.status(500).json({ error: currentPeriodError.message });
+      }
+      currentPeriodByHouse = new Map((currentPeriods || []).map((period) => [period.house_id, period]));
+    }
+
+    // "Last payment" is the most recently Verified transaction against each
+    // house. Fetched once for every house this member has, then reduced to
+    // one row per house_id here - PostgREST has no clean "latest per group"
+    // shortcut, and per-member house counts are always small. Ordered (and
+    // picked) by verified_at, not txn_date: txn_date is resident-supplied
+    // and optional (see the same caution in routes/transactions.js's report
+    // endpoint) so it can be NULL and is not safe to sort by. The date shown
+    // below still prefers txn_date when present, purely for display - that
+    // is the actual UPI payment date, which can genuinely be a day or two
+    // before an Admin gets to verify it, and showing verified_at instead
+    // would read as "wrong"/confusing to the resident.
+    let lastPaymentByHouse = new Map();
+    if (houseIds.length > 0) {
+      const { data: verifiedTransactions, error: verifiedError } = await supabase
+        .from('transactions')
+        .select('house_id, amount, txn_date, verified_at')
+        .in('house_id', houseIds)
+        .eq('processing_status', 'Verified')
+        .order('verified_at', { ascending: false });
+
+      if (verifiedError) {
+        return res.status(500).json({ error: verifiedError.message });
+      }
+      for (const transaction of verifiedTransactions || []) {
+        if (!lastPaymentByHouse.has(transaction.house_id)) {
+          lastPaymentByHouse.set(transaction.house_id, {
+            amount: transaction.amount,
+            date: transaction.txn_date || transaction.verified_at,
+          });
+        }
+      }
+    }
 
     let billingPeriods = [];
     if (houseIds.length > 0) {
@@ -107,7 +160,14 @@ router.get('/', authenticate, async (req, res) => {
       }));
     }
 
-    entry.houseAssignments = assignments;
+    entry.houseAssignments = assignments.map((assignment) => {
+      const houseId = assignment.houses?.id;
+      return {
+        ...assignment,
+        currentPeriod: houseId ? currentPeriodByHouse.get(houseId) || null : null,
+        lastPayment: houseId ? lastPaymentByHouse.get(houseId) || null : null,
+      };
+    });
     entry.openBillingPeriods = billingPeriods;
     // Convenience total so the client doesn't need to sum client-side -
     // this member's full personal outstanding balance across all open
@@ -116,26 +176,28 @@ router.get('/', authenticate, async (req, res) => {
     entry.totalOutstanding = billingPeriods.reduce((sum, period) => sum + Number(period.amount_due), 0);
 
     if (membership.is_admin || membership.is_committee_member) {
-      const { data: houses, error: housesError } = await supabase
+      // A count, not the houses themselves - a real society can have well
+      // over a hundred houses, and this same /me response gets re-fetched
+      // on essentially every screen (see App.js's own note on that
+      // tradeoff). AdminHomeScreen's dashboard tile is the only consumer,
+      // and only ever needed the count; HousesScreen used to read the full
+      // array here too, but is now its own search-driven screen backed by
+      // GET /houses/search instead of ever listing every house at once.
+      // { count: 'exact', head: true } asks Postgres for just the row
+      // count with no rows returned, not "select everything then measure
+      // .length" - the earlier full unused society-wide billing_periods
+      // fetch this block also used to do (nothing ever read entry.
+      // billingPeriods) is dropped entirely for the same reason.
+      const { count: houseCount, error: housesError } = await supabase
         .from('houses')
-        .select('id, house_number, type, owner_name, status')
+        .select('id', { count: 'exact', head: true })
         .eq('society_id', membership.society_id);
 
       if (housesError) {
         return res.status(500).json({ error: housesError.message });
       }
 
-      const { data: societyBillingPeriods, error: periodsError } = await supabase
-        .from('billing_periods')
-        .select('id, house_id, period_month, amount_due, status')
-        .eq('society_id', membership.society_id);
-
-      if (periodsError) {
-        return res.status(500).json({ error: periodsError.message });
-      }
-
-      entry.houses = houses;
-      entry.billingPeriods = societyBillingPeriods;
+      entry.houseCount = houseCount ?? 0;
     }
 
     result.memberships.push(entry);

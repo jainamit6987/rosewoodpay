@@ -23,23 +23,19 @@ function formatMonth(periodMonth) {
   return new Date(periodMonth).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
 }
 
-// Cash payments (Admin-recorded, see routes/transactions.js) never have a
-// utr_number - it stays NULL, since there is no bank reference for a
-// physical cash handover. Showing "UTR null" there would read as a data
-// bug rather than the expected absence, so this names the payment mode
-// itself instead whenever there is no UTR to show.
+// Same as MyTransactionsScreen's own formatPaymentReference - a Cash
+// payment never has a utr_number (no bank reference for a physical
+// handover), so this names the payment mode itself instead of showing a
+// misleading "UTR null". This is the one transaction-list screen where a
+// Cash row is actually common (an Admin's own house-scoped view sees every
+// status, not just Submitted ones), so this is the fix that matters most.
 function formatPaymentReference(transaction) {
   return transaction.payment_mode === 'Cash' ? 'Cash' : `UTR ${transaction.utr_number}`;
 }
 
-// Names the actual month(s) this payment was allocated to, not just a
-// count - the DB has always fully supported this (transaction_allocations
-// is a real many-to-many join table, one row per transaction+billing_period
-// pair, exactly to let one payment cover several months and still know
-// which ones), GET /transactions/mine just wasn't asking for each
-// allocation's own period_month until now. Sorted oldest-first to read as
-// a small FIFO timeline, matching the order the backend actually applies
-// payments in (routes/transactions.js).
+// Same allocation-naming logic as MyTransactionsScreen - see that file's
+// own comment for why this reads transaction_allocations rather than a
+// plain count.
 function describeAllocations(transaction) {
   const allocations = transaction.transaction_allocations || [];
   if (allocations.length === 0) return 'No billing period allocated yet';
@@ -51,10 +47,6 @@ function describeAllocations(transaction) {
   return `Covers: ${months.join(', ')}`;
 }
 
-// Kept in sync with the chk_processing_status CHECK constraint. Grouped into
-// three visual buckets rather than one color per exact value - a resident
-// cares whether a payment is settled, rejected, or still somewhere in
-// between, not which exact internal processing stage it is sitting in.
 function statusBadgeStyle(status) {
   if (status === 'Verified') return styles.badgeVerified;
   if (status === 'Rejected' || status === 'Failed') return styles.badgeRejected;
@@ -67,15 +59,13 @@ function statusTextStyle(status) {
   return styles.badgeTextPending;
 }
 
-// The resident-facing "View Transactions (all)" screen (workflow S.No 4) -
-// every payment the caller has ever submitted, across every house they are
-// Active-assigned to, backed by the aggregated GET /transactions/mine
-// (co-assignee visibility included, so an owner who rents out a house sees
-// their tenant's payments here too - see that route's own comment). Unlike
-// BillingHistoryScreen (one house, every billing period), this is
-// transaction-shaped and spans every house at once, matching how the
-// backend endpoint itself aggregates.
-export default function MyTransactionsScreen({ onBack }) {
+// The Admin/Committee-facing "view transactions for a house" screen
+// (workflow S.No 23) - every payment ever submitted against this one
+// house, backed by GET /houses/:houseId/transactions (already existed for
+// a while with no screen calling it - RLS on that route already lets any
+// Admin/Committee member of the society see any house's transactions).
+// Reached from a "Transactions" tile on HouseDashboardScreen.
+export default function HouseTransactionsScreen({ house, onBack }) {
   const { accessToken } = useAuth();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -85,12 +75,12 @@ export default function MyTransactionsScreen({ onBack }) {
   const load = useCallback(async () => {
     try {
       setError(null);
-      const data = await apiGet('/transactions/mine', accessToken);
+      const data = await apiGet(`/houses/${house.id}/transactions`, accessToken);
       setTransactions(data);
     } catch (err) {
       setError(err.message);
     }
-  }, [accessToken]);
+  }, [accessToken, house.id]);
 
   useEffect(() => {
     load().finally(() => setLoading(false));
@@ -110,9 +100,9 @@ export default function MyTransactionsScreen({ onBack }) {
     >
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>My transactions</Text>
+          <Text style={styles.title}>{house.house_number}</Text>
           <Text style={styles.subtitle}>
-            {transactions.length} payment{transactions.length === 1 ? '' : 's'} across all your houses
+            {transactions.length} payment{transactions.length === 1 ? '' : 's'}
           </Text>
         </View>
         <TouchableOpacity onPress={onBack}>
@@ -132,19 +122,18 @@ export default function MyTransactionsScreen({ onBack }) {
           </TouchableOpacity>
         </View>
       ) : transactions.length === 0 ? (
-        <Text style={styles.empty}>No payments submitted yet.</Text>
+        <Text style={styles.empty}>No payments recorded for this house yet.</Text>
       ) : (
         transactions.map((transaction) => (
           <View key={transaction.id} style={styles.card}>
             <View style={styles.cardHeader}>
-              <Text style={styles.houseNumber}>{transaction.houses?.house_number}</Text>
+              <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
               <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
                 <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
                   {transaction.processing_status}
                 </Text>
               </View>
             </View>
-            <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
             <Text style={styles.meta}>
               {transaction.transaction_type} • {formatPaymentReference(transaction)} • {formatDate(transaction.created_at)}
             </Text>
@@ -212,14 +201,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 6,
   },
-  houseNumber: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
   amount: {
     fontSize: 18,
     fontWeight: '700',
-    marginBottom: 6,
   },
   meta: {
     fontSize: 13,

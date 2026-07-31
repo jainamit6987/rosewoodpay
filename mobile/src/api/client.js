@@ -44,3 +44,7 @@ export function apiGet(path, accessToken) {
 export function apiPost(path, accessToken, body) {
   return request('POST', path, accessToken, body);
 }
+
+export function apiPatch(path, accessToken, body) {
+  return request('PATCH', path, accessToken, body);
+}

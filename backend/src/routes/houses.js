@@ -1,10 +1,252 @@
 const express = require('express');
 const authenticate = require('../middleware/authenticate');
+const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
 const PG_UNIQUE_VIOLATION = '23505';
 const MAX_MONTHS_PER_REQUEST = 24; // guardrail against a fat-fingered "months" value, not a real business rule
+const MAX_SEARCH_RESULTS = 5;
+
+// Admin/Committee-only: case-insensitive partial match on house_number OR
+// owner_name, across every society the caller administers or sits on the
+// committee of - the same "collect societyIds from an Active is_admin/
+// is_committee_member membership, 403 if none" shape GET /transactions/
+// pending and GET /members already use. This exists because a real society
+// can have well over a hundred houses - GET /me used to embed the full
+// houses array for exactly this screen, but "scroll through all of them"
+// stops being usable long before 100, and re-fetching that whole array on
+// every /me call (which happens on nearly every screen - see App.js) only
+// gets more wasteful as the list grows. Capped at MAX_SEARCH_RESULTS
+// regardless of match count; an empty/missing q returns an empty array
+// rather than "everything" - there is no sensible default page of 100+
+// houses to show before the admin has typed anything.
+//
+// Two separate ilike queries, not one combined filter, deliberately: the
+// PostgREST .or() string syntax treats commas/parentheses as its own
+// delimiters, so splicing a raw, arbitrary search term into one would
+// either break on a term containing either character or need its own
+// fragile manual escaping. Running two simple, safe queries and merging in
+// JS avoids that class of bug entirely, and neither query is expensive at
+// this scale.
+router.get('/search', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  if (!q) {
+    return res.json([]);
+  }
+
+  const { data: memberships, error: membershipError } = await supabase
+    .from('society_members')
+    .select('society_id')
+    .eq('auth_user_id', req.user.id)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true');
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+
+  const societyIds = [...new Set((memberships || []).map((m) => m.society_id))];
+  if (societyIds.length === 0) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can search houses.' });
+  }
+
+  const houseFields = 'id, house_number, type, owner_name, status, default_monthly_amount';
+  const [byNumber, byOwner] = await Promise.all([
+    supabase
+      .from('houses')
+      .select(houseFields)
+      .in('society_id', societyIds)
+      .ilike('house_number', `%${q}%`)
+      .order('house_number', { ascending: true })
+      .limit(MAX_SEARCH_RESULTS),
+    supabase
+      .from('houses')
+      .select(houseFields)
+      .in('society_id', societyIds)
+      .ilike('owner_name', `%${q}%`)
+      .order('house_number', { ascending: true })
+      .limit(MAX_SEARCH_RESULTS),
+  ]);
+
+  if (byNumber.error) {
+    return res.status(500).json({ error: byNumber.error.message });
+  }
+  if (byOwner.error) {
+    return res.status(500).json({ error: byOwner.error.message });
+  }
+
+  const houseById = new Map();
+  for (const house of [...(byNumber.data || []), ...(byOwner.data || [])]) {
+    houseById.set(house.id, house);
+  }
+
+  const results = [...houseById.values()]
+    .sort((a, b) => a.house_number.localeCompare(b.house_number))
+    .slice(0, MAX_SEARCH_RESULTS);
+
+  res.json(results);
+});
+
+// Admin/Committee-only: a single house's own "dashboard" - the same shape
+// of information ResidentHomeScreen shows a resident about their own house
+// (current billing period, current due, last payment), reached by tapping
+// a result on the search screen above. Deliberately does NOT rely on the
+// looser "houses RLS lets any member of the same society see the house
+// row" gate the sibling /:houseId/transactions and /:houseId/billing-
+// periods routes use below - those return rows whose *own* RLS policies
+// already filter out anything a merely-same-society caller shouldn't see,
+// but this response includes an assigned resident's email/phone directly,
+// which must not be reachable by just any member who happens to know or
+// guess a house's id. Explicit Admin/Committee check instead, same shape
+// as the create/waive billing-period routes further below.
+router.get('/:houseId/dashboard', authenticate, async (req, res) => {
+  const { houseId } = req.params;
+  const supabase = req.supabase;
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, society_id, house_number, type, owner_name, status, default_monthly_amount')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  const { data: membership, error: membershipError } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('society_id', house.society_id)
+    .eq('auth_user_id', req.user.id)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true')
+    .maybeSingle();
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+  if (!membership) {
+    return res
+      .status(403)
+      .json({ error: "Only an Admin or Committee member of this house's society can view its dashboard." });
+  }
+
+  // "Current billing period" is this calendar month's own period, whatever
+  // its status - same definition GET /me uses for a resident's own
+  // dashboard (see routes/me.js). Null if this month's period has not
+  // been generated yet.
+  const now = new Date();
+  const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const { data: currentPeriod, error: currentPeriodError } = await supabase
+    .from('billing_periods')
+    .select('id, period_month, amount_due, status')
+    .eq('house_id', houseId)
+    .eq('period_month', currentMonthStart)
+    .maybeSingle();
+
+  if (currentPeriodError) {
+    return res.status(500).json({ error: currentPeriodError.message });
+  }
+
+  // "Current due" sums every still-Open period for this house, arrears
+  // included - same definition as GET /me's totalOutstanding, just scoped
+  // to one house instead of every house a resident is personally assigned
+  // to.
+  const { data: openPeriods, error: openPeriodsError } = await supabase
+    .from('billing_periods')
+    .select('amount_due')
+    .eq('house_id', houseId)
+    .eq('status', 'Open');
+
+  if (openPeriodsError) {
+    return res.status(500).json({ error: openPeriodsError.message });
+  }
+  const currentDue = (openPeriods || []).reduce((sum, period) => sum + Number(period.amount_due), 0);
+
+  // "Last payment" - the most recently Verified transaction against this
+  // house. Same txn_date-preferred-for-display/verified_at-for-ordering
+  // logic as GET /me (see that file's own note: txn_date is resident-
+  // supplied and optional, so it is not safe to sort/pick by, only to
+  // display).
+  const { data: lastVerified, error: lastVerifiedError } = await supabase
+    .from('transactions')
+    .select('amount, txn_date, verified_at')
+    .eq('house_id', houseId)
+    .eq('processing_status', 'Verified')
+    .order('verified_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (lastVerifiedError) {
+    return res.status(500).json({ error: lastVerifiedError.message });
+  }
+  const lastPayment = lastVerified
+    ? { amount: lastVerified.amount, date: lastVerified.txn_date || lastVerified.verified_at }
+    : null;
+
+  // Every currently Active assignment for this house - a co-owner/tenant
+  // pair both show up here, not just one (see the co-assignee visibility
+  // work elsewhere in this codebase); an unassigned house simply returns
+  // an empty array rather than an error. auth.users is not part of the
+  // RLS-visible 'public' schema, so each resident's email needs a separate
+  // Admin API lookup - getUserById rather than the paginated listUsers()
+  // GET /assignments and GET /members use, since this is always at most a
+  // couple of residents per house rather than every member in the society.
+  const { data: assignments, error: assignmentsError } = await supabase
+    .from('resident_house_assignments')
+    .select('id, relationship_type, society_members(id, name, auth_user_id, phone_number)')
+    .eq('house_id', houseId)
+    .eq('status', 'Active');
+
+  if (assignmentsError) {
+    return res.status(500).json({ error: assignmentsError.message });
+  }
+
+  // memberId included so the mobile Residents cards (normal mode: name +
+  // role only, tapping opens MemberDetailScreen; Edit mode: revoke a card
+  // via the existing /assignments/:id/revoke) can identify each resident
+  // without a second round trip.
+  const residents = await Promise.all(
+    (assignments || []).map(async (assignment) => {
+      const authUserId = assignment.society_members?.auth_user_id;
+      let email = null;
+      if (authUserId) {
+        const { data: userData } = await supabaseAdmin.auth.admin.getUserById(authUserId);
+        email = userData?.user?.email || null;
+      }
+      return {
+        assignmentId: assignment.id,
+        relationshipType: assignment.relationship_type,
+        memberId: assignment.society_members?.id || null,
+        memberName: assignment.society_members?.name || null,
+        memberEmail: email,
+        memberPhoneNumber: assignment.society_members?.phone_number || null,
+      };
+    })
+  );
+
+  res.json({
+    house: {
+      id: house.id,
+      society_id: house.society_id,
+      house_number: house.house_number,
+      type: house.type,
+      owner_name: house.owner_name,
+      status: house.status,
+      default_monthly_amount: house.default_monthly_amount,
+    },
+    currentPeriod: currentPeriod || null,
+    currentDue,
+    lastPayment,
+    residents,
+  });
+});
 
 // Same "walk forward one month from the house's own last row, or from the
 // current month if it has none yet" logic as the auto-generation path in
@@ -57,10 +299,13 @@ router.get('/:houseId/transactions', authenticate, async (req, res) => {
   // transaction_allocations is embedded via its FK to transactions, so each
   // transaction shows exactly which billing period(s) it covers - a single
   // payment can span more than one (arrears catch-up, advance payments).
+  // Each allocation's own period_month is embedded too, same as GET
+  // /transactions/mine and GET /transactions/pending - a screen showing
+  // this list needs to name the actual month(s) covered, not just a count.
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated)'
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .eq('house_id', houseId)
     .order('created_at', { ascending: false });

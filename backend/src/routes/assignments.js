@@ -50,6 +50,31 @@ async function hasExistingAssignment(supabase, societyMemberId, houseId, exclude
   return (data || []).length > 0;
 }
 
+// Owner links are a legal fact about a house (who owns it of record),
+// deliberately treated as structurally permanent - unlike Tenant/Occupant
+// links, which come and go freely with zero restriction (a house with no
+// tenant is a completely normal, expected state). Revoking an Active
+// Owner assignment is therefore only ever safe when another Active Owner
+// assignment already covers the same house (a co-owner, or a replacement
+// the Admin just added via POST / before removing the old one) - discussed
+// with the user directly while planning the House Dashboard's Edit-mode
+// resident-card redesign: "before doing that we should check if new link
+// for the same house exist so that a house never be in an orphan state".
+// A house's only ever-orphan-able relationship is Owner; Tenant/Occupant
+// never needs this check at all, which is why it is not applied
+// unconditionally to every revoke below.
+async function hasOtherActiveOwner(supabase, houseId, excludeAssignmentId) {
+  const { data, error } = await supabase
+    .from('resident_house_assignments')
+    .select('id')
+    .eq('house_id', houseId)
+    .eq('relationship_type', 'Owner')
+    .eq('status', 'Active')
+    .neq('id', excludeAssignmentId);
+  if (error) throw new Error(error.message);
+  return (data || []).length > 0;
+}
+
 // Shared by approve/revoke/reassign, mirroring loadTransactionAndCheckAdmin
 // in transactions.js and loadMemberAndCheckAdmin in members.js.
 // resident_house_assignments has no society_id column of its own - it's
@@ -306,11 +331,18 @@ router.post('/:id/approve', authenticate, async (req, res) => {
 
 // POST /assignments/:id/revoke - Admin-only. Allowed from either Pending
 // (cancelling a request that's no longer needed) or Active (the resident
-// moved out, sold the house, tenancy ended, etc.) - 409 if already
-// Revoked. Never touches approved_by/approved_at (kept as the historical
-// record of who/when it *was* approved, if it was) - who revoked it and
-// when lives in audit_events, same as every other status-transition
-// action in this codebase.
+// moved out, tenancy ended, etc.) - 409 if already Revoked. Never touches
+// approved_by/approved_at (kept as the historical record of who/when it
+// *was* approved, if it was) - who revoked it and when lives in
+// audit_events, same as every other status-transition action in this
+// codebase.
+//
+// One extra guard on top of that, only for an Active Owner assignment -
+// see hasOtherActiveOwner's own comment above: revoking a house's only
+// Owner is blocked (409) until a replacement Owner assignment already
+// exists for that same house. Tenant/Occupant assignments (and a Pending
+// Owner one, which was never the house's owner of record to begin with)
+// are never subject to this - freely revocable exactly as before.
 router.post('/:id/revoke', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id } = req.params;
@@ -330,6 +362,20 @@ router.post('/:id/revoke', authenticate, async (req, res) => {
   }
   if (assignment.status === 'Revoked') {
     return res.status(409).json({ error: 'This assignment is already Revoked.' });
+  }
+
+  if (assignment.status === 'Active' && assignment.relationship_type === 'Owner') {
+    let hasReplacement;
+    try {
+      hasReplacement = await hasOtherActiveOwner(supabase, assignment.house_id, id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!hasReplacement) {
+      return res.status(409).json({
+        error: 'This is the only Owner assigned to this house. Add the new owner first, then remove this one - a house must always have an Owner of record.',
+      });
+    }
   }
 
   const { data: updated, error: updateError } = await supabase
@@ -438,6 +484,29 @@ router.post('/:id/reassign', authenticate, async (req, res) => {
   }
   if (duplicate) {
     return res.status(409).json({ error: 'That member already has a Pending or Active assignment to that house.' });
+  }
+
+  // Same "never leave a house without an Owner of record" rule as
+  // /revoke's own hasOtherActiveOwner check above, adapted for reassign:
+  // the new row created just below can itself be the old house's
+  // replacement Owner (a same-house Owner-to-Owner swap, e.g. ownership
+  // transferred to someone else) - only block when the old house is
+  // actually left without one, not whenever an Owner row happens to be
+  // involved.
+  const oldHouseLosesOwner = assignment.relationship_type === 'Owner';
+  const newRowCoversOldHouseAsOwner = targetHouseId === assignment.house_id && targetRelationship === 'Owner';
+  if (oldHouseLosesOwner && !newRowCoversOldHouseAsOwner) {
+    let hasReplacement;
+    try {
+      hasReplacement = await hasOtherActiveOwner(supabase, assignment.house_id, id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!hasReplacement) {
+      return res.status(409).json({
+        error: 'This is the only Owner assigned to its house. Add the new owner there first, then remove this one - a house must always have an Owner of record.',
+      });
+    }
   }
 
   const { error: revokeError } = await supabase.from('resident_house_assignments').update({ status: 'Revoked' }).eq('id', id);

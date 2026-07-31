@@ -24,6 +24,18 @@ function formatMonth(periodMonth) {
   return new Date(periodMonth).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
 }
 
+// Same as MyTransactionsScreen's own formatPaymentReference - a Cash
+// payment never has a utr_number (no bank reference for a physical
+// handover), so this names the payment mode itself instead of showing a
+// misleading "UTR null". In practice a Cash transaction never actually
+// reaches this particular screen (it auto-Verifies immediately and never
+// sits in Submitted - see routes/transactions.js), but kept here anyway so
+// this list stays correct if that ever changes, and for consistency with
+// the other transaction-list screens.
+function formatPaymentReference(transaction) {
+  return transaction.payment_mode === 'Cash' ? 'Cash' : `UTR ${transaction.utr_number}`;
+}
+
 // Same as MyTransactionsScreen's own describeAllocations - names the actual
 // month(s) this payment was allocated to via GET /transactions/pending's
 // nested transaction_allocations -> billing_periods embed, not just a bare
@@ -41,7 +53,7 @@ function describeAllocations(transaction) {
   return `Covers: ${months.join(', ')}`;
 }
 
-export default function AdminReviewScreen({ onBack, onLogout }) {
+export default function AdminReviewScreen({ onBack }) {
   const { accessToken } = useAuth();
   const [pending, setPending] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -141,14 +153,11 @@ export default function AdminReviewScreen({ onBack, onLogout }) {
             {pending.length} awaiting {pending.length === 1 ? 'review' : 'reviews'}
           </Text>
         </View>
-        <TouchableOpacity onPress={onLogout}>
-          <Text style={styles.signOutLink}>Sign out</Text>
-        </TouchableOpacity>
       </View>
 
       {onBack ? (
         <TouchableOpacity style={styles.backLink} onPress={onBack}>
-          <Text style={styles.backLinkText}>← Back to my dues</Text>
+          <Text style={styles.backLinkText}>← Back to dashboard</Text>
         </TouchableOpacity>
       ) : null}
 
@@ -169,7 +178,7 @@ export default function AdminReviewScreen({ onBack, onLogout }) {
               <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
             </View>
             <Text style={styles.meta}>
-              {transaction.transaction_type} • UTR {transaction.utr_number} • {formatDate(transaction.created_at)}
+              {transaction.transaction_type} • {formatPaymentReference(transaction)} • {formatDate(transaction.created_at)}
             </Text>
             <Text style={styles.meta}>{describeAllocations(transaction)}</Text>
 
@@ -251,12 +260,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#6e6e73',
     marginTop: 4,
-  },
-  signOutLink: {
-    color: '#1a73e8',
-    fontSize: 14,
-    fontWeight: '600',
-    paddingTop: 4,
   },
   backLink: {
     marginBottom: 16,

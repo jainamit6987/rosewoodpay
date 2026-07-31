@@ -20,6 +20,14 @@ const PG_INSUFFICIENT_PRIVILEGE = '42501';
 const TRANSACTION_TYPES = ['Maintenance', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
 
+// Kept in sync with the chk_payment_mode CHECK constraint added in
+// 20260731000000_add_payment_mode_to_transactions.sql. UPI is every
+// existing/default row (a resident self-reporting their own UPI payment);
+// Cash is the one narrower case this file adds special-case handling for
+// below - see that migration's own comment for the full reasoning.
+const PAYMENT_MODES = ['UPI', 'Cash'];
+const CASH_MODE = 'Cash';
+
 // Kept in sync with the chk_processing_status CHECK constraint in the
 // initial schema - used only to validate the optional ?status= filter on
 // GET /report below, not referenced anywhere else in this file.
@@ -72,6 +80,7 @@ router.post('/', authenticate, async (req, res) => {
     txn_date,
     transaction_type,
     payee_name,
+    payment_mode,
   } = req.body || {};
 
   if (amount === undefined || amount === null) {
@@ -82,7 +91,20 @@ router.post('/', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'amount must be a positive number.' });
   }
 
-  if (!utr_number && !raw_shared_payload && !proof_file_path) {
+  // Defaults to UPI - every existing client/seed/test row that predates
+  // this field is exactly that (a resident self-reporting their own UPI
+  // payment), so the default keeps them meaningful without a backfill.
+  const resolvedPaymentMode = payment_mode || 'UPI';
+  if (!PAYMENT_MODES.includes(resolvedPaymentMode)) {
+    return res.status(400).json({ error: `payment_mode must be one of: ${PAYMENT_MODES.join(', ')}.` });
+  }
+
+  // Cash has no UTR to report and nothing to screenshot/forward - the
+  // Admin recording it (checked further below, once house_id resolves to a
+  // society) is themselves the attestation that it happened, the same
+  // reasoning already used for UtilityBill/Salary/Other expenses just
+  // below. Every other mode still needs at least one piece of evidence.
+  if (resolvedPaymentMode !== CASH_MODE && !utr_number && !raw_shared_payload && !proof_file_path) {
     return res
       .status(400)
       .json({ error: 'At least one of utr_number, raw_shared_payload, or proof_file_path is required.' });
@@ -95,6 +117,17 @@ router.post('/', authenticate, async (req, res) => {
   if (!TRANSACTION_TYPES.includes(resolvedTransactionType)) {
     return res.status(400).json({
       error: `transaction_type must be one of: ${TRANSACTION_TYPES.join(', ')}.`,
+    });
+  }
+
+  // Cash is specifically for an Admin recording a resident's in-person cash
+  // payment against their dues - it has no place in the society-level
+  // expense path just below (those are the society paying someone else,
+  // already always Admin-only and always auto-Verified regardless of this
+  // field) or with any other transaction_type.
+  if (resolvedPaymentMode === CASH_MODE && resolvedTransactionType !== MAINTENANCE_TYPE) {
+    return res.status(400).json({
+      error: 'payment_mode "Cash" is only valid for Maintenance payments.',
     });
   }
 
@@ -232,6 +265,33 @@ router.post('/', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'House not found or not accessible.' });
   }
 
+  // Cash is deliberately Admin-only, not Committee - the same authorization
+  // level as /:id/verify itself (see loadTransactionAndCheckAdmin below),
+  // since recording one effectively performs that verification inline
+  // rather than leaving it Submitted for a separate review. Checked here,
+  // once house_id has resolved to a real society, rather than earlier -
+  // this reads the caller's own row (always visible regardless of status
+  // via the ungated "own record" policy), so status='Active' must be
+  // checked explicitly too, same reasoning as every other raw is_admin
+  // check in this file.
+  if (resolvedPaymentMode === CASH_MODE) {
+    const { data: cashAdminMembership, error: cashAdminError } = await supabase
+      .from('society_members')
+      .select('id')
+      .eq('society_id', house.society_id)
+      .eq('auth_user_id', req.user.id)
+      .eq('is_admin', true)
+      .eq('status', 'Active')
+      .maybeSingle();
+
+    if (cashAdminError) {
+      return res.status(500).json({ error: cashAdminError.message });
+    }
+    if (!cashAdminMembership) {
+      return res.status(403).json({ error: 'Only an Admin of this house\'s society can record a Cash payment.' });
+    }
+  }
+
   // Explicit assignment check, independent of whether any billing_periods
   // exist yet for this house - a brand-new or fully-caught-up house may
   // have zero periods, and we still need to distinguish "legitimately
@@ -362,6 +422,13 @@ router.post('/', authenticate, async (req, res) => {
     });
   }
 
+  // Cash is auto-Verified at insert time, same as the society-expense
+  // branch above and for the same reason: the Admin recording it (checked
+  // above) is already the attestation that it happened, so there is no
+  // separate untrusted self-report to double-check afterward the way a
+  // resident's own UPI/UTR claim needs to be.
+  const cashVerifiedAtIso = resolvedPaymentMode === CASH_MODE ? new Date().toISOString() : null;
+
   const { data: transaction, error: insertError } = await supabase
     .from('transactions')
     .insert({
@@ -374,6 +441,15 @@ router.post('/', authenticate, async (req, res) => {
       proof_file_path: proof_file_path || null,
       txn_date: txn_date || null,
       transaction_type: resolvedTransactionType,
+      payment_mode: resolvedPaymentMode,
+      ...(resolvedPaymentMode === CASH_MODE
+        ? {
+            processing_status: 'Verified',
+            payment_status: 'Success',
+            verified_by: req.user.id,
+            verified_at: cashVerifiedAtIso,
+          }
+        : {}),
     })
     .select()
     .single();
@@ -412,6 +488,51 @@ router.post('/', authenticate, async (req, res) => {
       error: `Transaction recorded but allocation failed: ${allocationError.message}`,
       transaction,
     });
+  }
+
+  // Cash was inserted already-Verified above, so it needs the same
+  // period-closing + audit-log side effects /:id/verify normally performs
+  // on a Submitted transaction - nothing will ever call verify on this row
+  // since it never sits in Submitted to begin with.
+  if (resolvedPaymentMode === CASH_MODE) {
+    let closedPeriods = [];
+    try {
+      closedPeriods = await closeFullyPaidPeriods(
+        supabase,
+        [...new Set(allocations.map((a) => a.billing_period_id))]
+      );
+    } catch (err) {
+      return res.status(500).json({
+        error: `Cash payment recorded but closing paid-off periods failed: ${err.message}`,
+        transaction,
+        allocations: insertedAllocations,
+      });
+    }
+
+    const { error: cashAuditError } = await supabase.from('audit_events').insert({
+      society_id: transaction.society_id,
+      actor_user_id: req.user.id,
+      entity_type: 'transaction',
+      entity_id: transaction.id,
+      action: 'Verified',
+      metadata: {
+        amount: transaction.amount,
+        payment_mode: CASH_MODE,
+        closedPeriods,
+        auto_verified: true,
+      },
+    });
+
+    if (cashAuditError) {
+      return res.status(500).json({
+        error: `Cash payment recorded but the audit log entry failed: ${cashAuditError.message}`,
+        transaction,
+        allocations: insertedAllocations,
+        closedPeriods,
+      });
+    }
+
+    return res.status(201).json({ ...transaction, allocations: insertedAllocations, closedPeriods });
   }
 
   res.status(201).json({ ...transaction, allocations: insertedAllocations });
@@ -454,7 +575,7 @@ router.get('/pending', authenticate, async (req, res) => {
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')
@@ -569,7 +690,7 @@ router.get('/report', authenticate, async (req, res) => {
   let query = supabase
     .from('transactions')
     .select(
-      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
+      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
     )
     .in('society_id', societyIds)
     .order('created_at', { ascending: false });
@@ -639,7 +760,7 @@ router.get('/mine', authenticate, async (req, res) => {
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('house_id', houseIds)
     .order('created_at', { ascending: false });

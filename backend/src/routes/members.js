@@ -10,6 +10,13 @@ const PG_UNIQUE_VIOLATION = '23505';
 // 20260725010000_add_phone_number_to_society_members.sql exactly.
 const PHONE_NUMBER_PATTERN = /^[0-9+\-\s()]{7,20}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_SEARCH_RESULTS = 5;
+// ~100 years - Supabase's ban API takes a duration, not a true "forever";
+// this is the same "may as well be permanent, but stays reversible via
+// /reactivate's own updateUserById(..., { ban_duration: 'none' }) call"
+// convention several other projects using this same API use, since there
+// is no dedicated "disable this login" flag distinct from a timed ban.
+const PERMANENT_BAN_DURATION = '876000h';
 
 // Not a real invite email - there is no SMTP configured anywhere in this
 // app - just a password the Admin creating the account can hand to the
@@ -70,7 +77,7 @@ router.get('/', authenticate, async (req, res) => {
   const { data: members, error: membersError } = await supabase
     .from('society_members')
     .select(
-      'id, society_id, auth_user_id, is_admin, is_committee_member, status, phone_number, created_at, resident_house_assignments(status, relationship_type, houses(house_number))'
+      'id, society_id, auth_user_id, name, is_admin, is_committee_member, status, phone_number, created_at, resident_house_assignments(status, relationship_type, houses(house_number))'
     )
     .in('society_id', societyIds)
     .order('created_at', { ascending: true });
@@ -88,6 +95,7 @@ router.get('/', authenticate, async (req, res) => {
   const result = (members || []).map((member) => ({
     id: member.id,
     societyId: member.society_id,
+    name: member.name,
     email: emailById.get(member.auth_user_id) || null,
     isAdmin: member.is_admin,
     isCommitteeMember: member.is_committee_member,
@@ -102,6 +110,167 @@ router.get('/', authenticate, async (req, res) => {
   res.json(result);
 });
 
+// GET /members/search?q= - Admin or Committee, across every society they
+// administer/sit on committee of. Matches name OR phone_number (not
+// email - deliberately not part of this search per the user's own call;
+// email is still returned on each result for display, just not something
+// this can be searched by) - same "two independent ilike queries merged
+// and deduped in JS, not one combined .or() string" shape as
+// GET /houses/search, for the exact same reason: splicing an arbitrary
+// admin-typed term into PostgREST's .or() risks breaking on a comma or
+// parenthesis in that term. Capped at MAX_SEARCH_RESULTS regardless of
+// match count; an empty/missing q returns [], never "everyone" - the same
+// scale reasoning as houses/search (a real society can have well over a
+// hundred members).
+//
+// Registered before GET /:id below - Express matches routes in
+// registration order and /:id would otherwise swallow a literal
+// "/members/search" request as id="search".
+router.get('/search', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  if (!q) {
+    return res.json([]);
+  }
+
+  const { data: memberships, error: membershipError } = await supabase
+    .from('society_members')
+    .select('society_id')
+    .eq('auth_user_id', req.user.id)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true');
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+
+  const societyIds = [...new Set((memberships || []).map((m) => m.society_id))];
+  if (societyIds.length === 0) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can search members.' });
+  }
+
+  const memberFields = 'id, society_id, auth_user_id, name, is_admin, is_committee_member, status, phone_number, created_at';
+  const [byName, byPhone] = await Promise.all([
+    supabase
+      .from('society_members')
+      .select(memberFields)
+      .in('society_id', societyIds)
+      .ilike('name', `%${q}%`)
+      .limit(MAX_SEARCH_RESULTS),
+    supabase
+      .from('society_members')
+      .select(memberFields)
+      .in('society_id', societyIds)
+      .ilike('phone_number', `%${q}%`)
+      .limit(MAX_SEARCH_RESULTS),
+  ]);
+
+  if (byName.error) {
+    return res.status(500).json({ error: byName.error.message });
+  }
+  if (byPhone.error) {
+    return res.status(500).json({ error: byPhone.error.message });
+  }
+
+  const memberById = new Map();
+  for (const member of [...(byName.data || []), ...(byPhone.data || [])]) {
+    memberById.set(member.id, member);
+  }
+
+  const matched = [...memberById.values()]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, MAX_SEARCH_RESULTS);
+
+  const { data: usersPage, error: usersError } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+  if (usersError) {
+    return res.status(500).json({ error: usersError.message });
+  }
+  const emailById = new Map((usersPage?.users || []).map((u) => [u.id, u.email]));
+
+  res.json(
+    matched.map((member) => ({
+      id: member.id,
+      societyId: member.society_id,
+      name: member.name,
+      email: emailById.get(member.auth_user_id) || null,
+      isAdmin: member.is_admin,
+      isCommitteeMember: member.is_committee_member,
+      status: member.status,
+      phoneNumber: member.phone_number,
+      createdAt: member.created_at,
+    }))
+  );
+});
+
+// GET /members/:id - Admin or Committee of that member's own society. The
+// single-member counterpart to the list above, for the new Member Detail
+// screen (reached either from the Members directory's search results or
+// from a House Dashboard resident card) - that screen does its own live
+// fetch rather than trusting a possibly-stale object handed to it by
+// whichever screen navigated here, same "the detail screen is the source
+// of truth, not its caller" precedent as HouseDashboardScreen's own
+// GET /houses/:houseId/dashboard. Returns every house assignment
+// (Active/Pending/Revoked), not just Active - useful history context on a
+// detail view, unlike the list endpoint above which only ever needed the
+// current Active one(s) for a compact row.
+router.get('/:id', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id } = req.params;
+
+  const { data: member, error: memberError } = await supabase
+    .from('society_members')
+    .select(
+      'id, society_id, auth_user_id, name, is_admin, is_committee_member, status, phone_number, created_at, resident_house_assignments(id, status, relationship_type, created_at, houses(id, house_number))'
+    )
+    .eq('id', id)
+    .maybeSingle();
+
+  if (memberError) {
+    return res.status(500).json({ error: memberError.message });
+  }
+  if (!member) {
+    return res.status(404).json({ error: 'Member not found or not accessible.' });
+  }
+
+  let callerIsAdmin;
+  try {
+    callerIsAdmin = await requireActiveAdmin(supabase, req.user.id, member.society_id);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerIsAdmin) {
+    return res.status(403).json({ error: "Only an Admin of this member's society can view them." });
+  }
+
+  const { data: userData, error: userError } = await supabaseAdmin.auth.admin.getUserById(member.auth_user_id);
+  if (userError) {
+    return res.status(500).json({ error: userError.message });
+  }
+
+  res.json({
+    id: member.id,
+    societyId: member.society_id,
+    name: member.name,
+    email: userData?.user?.email || null,
+    isAdmin: member.is_admin,
+    isCommitteeMember: member.is_committee_member,
+    status: member.status,
+    phoneNumber: member.phone_number,
+    createdAt: member.created_at,
+    assignments: (member.resident_house_assignments || [])
+      .map((a) => ({
+        id: a.id,
+        houseId: a.houses?.id,
+        houseNumber: a.houses?.house_number,
+        relationshipType: a.relationship_type,
+        status: a.status,
+        createdAt: a.created_at,
+      }))
+      .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt)),
+  });
+});
+
 // POST /members - Admin-only. Creates a brand-new auth.users account (the
 // Admin API is the only way to do this - it is not a 'public' schema
 // table RLS has any say over) plus the society_members row linking it to
@@ -113,13 +282,16 @@ router.get('/', authenticate, async (req, res) => {
 // system with login credentials", nothing more.
 router.post('/', authenticate, async (req, res) => {
   const supabase = req.supabase;
-  const { society_id, email, password, phone_number, is_admin, is_committee_member } = req.body || {};
+  const { society_id, email, password, name, phone_number, is_admin, is_committee_member } = req.body || {};
 
   if (!society_id) {
     return res.status(400).json({ error: 'society_id is required.' });
   }
   if (!email || typeof email !== 'string' || !EMAIL_PATTERN.test(email.trim())) {
     return res.status(400).json({ error: 'A valid email is required.' });
+  }
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'A non-empty name is required.' });
   }
   if (password !== undefined && (typeof password !== 'string' || password.length < 6)) {
     return res.status(400).json({ error: 'password, if provided, must be at least 6 characters.' });
@@ -173,6 +345,7 @@ router.post('/', authenticate, async (req, res) => {
     .insert({
       society_id,
       auth_user_id: newAuthUserId,
+      name: name.trim(),
       is_admin: is_admin === true,
       is_committee_member: is_committee_member === true,
       status: 'Active',
@@ -201,7 +374,12 @@ router.post('/', authenticate, async (req, res) => {
     entity_type: 'society_member',
     entity_id: member.id,
     action: 'Created',
-    metadata: { email: normalizedEmail, is_admin: member.is_admin, is_committee_member: member.is_committee_member },
+    metadata: {
+      email: normalizedEmail,
+      name: member.name,
+      is_admin: member.is_admin,
+      is_committee_member: member.is_committee_member,
+    },
   });
 
   if (auditError) {
@@ -220,7 +398,7 @@ router.post('/', authenticate, async (req, res) => {
   res.status(201).json(response);
 });
 
-// PATCH /members/:id - Admin-only. Edits is_admin/is_committee_member/
+// PATCH /members/:id - Admin-only. Edits name/is_admin/is_committee_member/
 // phone_number - never society_id (fixed at creation, moving societies is
 // not a real operation) or status (use /suspend and /reactivate instead,
 // for the same clear-audit-trail-via-dedicated-action reasoning as
@@ -228,12 +406,15 @@ router.post('/', authenticate, async (req, res) => {
 router.patch('/:id', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id } = req.params;
-  const { is_admin, is_committee_member, phone_number } = req.body || {};
+  const { name, is_admin, is_committee_member, phone_number } = req.body || {};
 
-  if (is_admin === undefined && is_committee_member === undefined && phone_number === undefined) {
+  if (name === undefined && is_admin === undefined && is_committee_member === undefined && phone_number === undefined) {
     return res.status(400).json({
-      error: 'Provide at least one of is_admin, is_committee_member, or phone_number to update.',
+      error: 'Provide at least one of name, is_admin, is_committee_member, or phone_number to update.',
     });
+  }
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+    return res.status(400).json({ error: 'name, if provided, must be a non-empty string.' });
   }
   if (is_admin !== undefined && typeof is_admin !== 'boolean') {
     return res.status(400).json({ error: 'is_admin must be a boolean.' });
@@ -278,6 +459,7 @@ router.patch('/:id', authenticate, async (req, res) => {
   }
 
   const updates = {};
+  if (name !== undefined) updates.name = name.trim();
   if (is_admin !== undefined) updates.is_admin = is_admin;
   if (is_committee_member !== undefined) updates.is_committee_member = is_committee_member;
   if (phone_number !== undefined) updates.phone_number = phone_number;
@@ -328,15 +510,48 @@ async function loadMemberAndCheckAdmin(supabase, userId, memberId) {
   return { member, isAdmin };
 }
 
+// Suspend's own precondition (see the House Dashboard Edit-mode delete/
+// add-linkage work and its "Owner links are structurally permanent,
+// Tenant/Occupant come and go" rule, discussed with the user before
+// building this): a house's *housing* situation must already be sorted
+// out through that dedicated flow before an account gets suspended here -
+// this endpoint deliberately does not try to cascade-revoke anything
+// itself. Named houses in the 400 below so the Admin knows exactly what
+// to go fix first, rather than a bare "can't do this".
+async function getActiveAssignmentHouses(supabase, societyMemberId) {
+  const { data, error } = await supabase
+    .from('resident_house_assignments')
+    .select('relationship_type, houses(house_number)')
+    .eq('society_member_id', societyMemberId)
+    .eq('status', 'Active');
+  if (error) throw new Error(error.message);
+  return (data || []).map((a) => `${a.houses?.house_number} (${a.relationship_type})`);
+}
+
 // POST /members/:id/suspend - Admin-only. Sets status='Suspended', which -
-// since 20260727000000_enforce_suspended_status_in_rls.sql - genuinely
-// revokes everything: admin/committee powers via the two helper
-// functions, and the member's own resident actions (submit payments, view
-// dues/houses/assignments) via the direct policies that migration also
-// updated. An Admin can never suspend themselves (checked below, before
-// the update happens - requireActiveAdmin above still sees them as
-// Active at that point) - the only way out of a self-suspend attempt is
-// asking a different Admin, which is exactly the point.
+// since 20260727000000_enforce_suspended_status_in_rls.sql - already
+// revokes every in-app capability: admin/committee powers via the two
+// helper functions, and the member's own resident actions (submit
+// payments, view dues/houses/assignments) via the direct policies that
+// migration also updated. On top of that, this also now actually bans the
+// underlying Supabase auth account (ban_duration below) so the sign-in
+// attempt itself fails on LoginScreen, rather than succeeding into an app
+// that then denies everything - a real, user-requested strengthening
+// over the RLS-only lockout this endpoint used to rely on exclusively.
+//
+// Blocked (400) if the member still holds any Active house assignment -
+// Owner or Tenant/Occupant - forcing that to be dealt with first via the
+// House Dashboard's own Edit mode (revoke the tenant, or add a
+// replacement owner and remove this one). Deliberately not a cascading
+// revoke here: an Owner's link is a legal fact about the house, unaffected
+// by whether their login is disabled, so this endpoint has no business
+// silently touching it - see the House Dashboard resident-card redesign
+// work for where that lives instead.
+//
+// An Admin can never suspend themselves (checked below, before the update
+// happens - requireActiveAdmin above still sees them as Active at that
+// point) - the only way out of a self-suspend attempt is asking a
+// different Admin, which is exactly the point.
 router.post('/:id/suspend', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id } = req.params;
@@ -361,6 +576,18 @@ router.post('/:id/suspend', authenticate, async (req, res) => {
     return res.status(409).json({ error: 'This member is already Suspended.' });
   }
 
+  let activeHouses;
+  try {
+    activeHouses = await getActiveAssignmentHouses(supabase, member.id);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (activeHouses.length > 0) {
+    return res.status(400).json({
+      error: `This member still has an active house assignment (${activeHouses.join(', ')}) - remove or reassign it from that house's dashboard before suspending.`,
+    });
+  }
+
   const { data: updated, error: updateError } = await supabase
     .from('society_members')
     .update({ status: 'Suspended' })
@@ -370,6 +597,16 @@ router.post('/:id/suspend', authenticate, async (req, res) => {
 
   if (updateError) {
     return res.status(500).json({ error: updateError.message });
+  }
+
+  const { error: banError } = await supabaseAdmin.auth.admin.updateUserById(member.auth_user_id, {
+    ban_duration: PERMANENT_BAN_DURATION,
+  });
+  if (banError) {
+    return res.status(500).json({
+      error: `Member suspended but disabling their login failed: ${banError.message}`,
+      member: updated,
+    });
   }
 
   const { error: auditError } = await supabase.from('audit_events').insert({
@@ -391,11 +628,11 @@ router.post('/:id/suspend', authenticate, async (req, res) => {
   res.json(updated);
 });
 
-// POST /members/:id/reactivate - Admin-only. Sets status='Active',
-// restoring everything /suspend above revoked. No self-check needed here
-// symmetrically to /suspend: a Suspended Admin has already lost is_admin
-// visibility via requireActiveAdmin (their own status is no longer
-// 'Active'), so they can never reach isAdmin=true to reactivate
+// POST /members/:id/reactivate - Admin-only. Sets status='Active' and lifts
+// the auth ban /suspend above applied, restoring everything. No self-check
+// needed here symmetrically to /suspend: a Suspended Admin has already
+// lost is_admin visibility via requireActiveAdmin (their own status is no
+// longer 'Active'), so they can never reach isAdmin=true to reactivate
 // themselves in the first place - a different, still-Active Admin is
 // required, exactly like /suspend intends.
 router.post('/:id/reactivate', authenticate, async (req, res) => {
@@ -430,6 +667,16 @@ router.post('/:id/reactivate', authenticate, async (req, res) => {
 
   if (updateError) {
     return res.status(500).json({ error: updateError.message });
+  }
+
+  const { error: unbanError } = await supabaseAdmin.auth.admin.updateUserById(member.auth_user_id, {
+    ban_duration: 'none',
+  });
+  if (unbanError) {
+    return res.status(500).json({
+      error: `Member reactivated but re-enabling their login failed: ${unbanError.message}`,
+      member: updated,
+    });
   }
 
   const { error: auditError } = await supabase.from('audit_events').insert({

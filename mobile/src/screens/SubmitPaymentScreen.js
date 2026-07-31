@@ -38,8 +38,17 @@ function sumAmountDue(periods) {
   return (periods || []).reduce((sum, p) => sum + Number(p.amount_due), 0);
 }
 
-export default function SubmitPaymentScreen({ house, society, selectedPeriods, onDone, onCancel }) {
+// paymentMode defaults to 'UPI' - the only mode this screen supported
+// before Cash existed, and still the entire resident self-service flow
+// (UPI deep link + UTR entry) below. 'Cash' is the Admin-only counterpart
+// (see HouseDashboardScreen's "Submit Cash Payment" link, the only place
+// that passes it): no UTR to collect, no UPI app to open - the backend
+// (routes/transactions.js) auto-Verifies a Cash submission immediately, so
+// this screen's own copy/success message reflects that instead of "will
+// show as Verified once an admin confirms it".
+export default function SubmitPaymentScreen({ house, society, selectedPeriods, paymentMode, onDone, onCancel }) {
   const { accessToken } = useAuth();
+  const isCash = paymentMode === 'Cash';
   const [amount, setAmount] = useState(
     selectedPeriods && selectedPeriods.length > 0 ? String(sumAmountDue(selectedPeriods)) : ''
   );
@@ -77,7 +86,7 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
       setError('Enter a valid amount.');
       return;
     }
-    if (!utrNumber.trim()) {
+    if (!isCash && !utrNumber.trim()) {
       setError('Enter the UTR / reference number from your payment confirmation.');
       return;
     }
@@ -87,7 +96,8 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
       const response = await apiPost('/transactions', accessToken, {
         house_id: house.id,
         amount: parsedAmount,
-        utr_number: utrNumber.trim(),
+        payment_mode: paymentMode || 'UPI',
+        ...(isCash ? {} : { utr_number: utrNumber.trim() }),
       });
       setResult(response);
     } catch (err) {
@@ -103,13 +113,14 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
   if (result) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.successTitle}>Payment submitted</Text>
+        <Text style={styles.successTitle}>{isCash ? 'Cash payment recorded' : 'Payment submitted'}</Text>
         <Text style={styles.subtitle}>
           Covered {result.allocations.length} billing period{result.allocations.length === 1 ? '' : 's'} for{' '}
-          {house.house_number}. It will show as Verified once an admin confirms it.
+          {house.house_number}.{' '}
+          {isCash ? 'Already Verified - no further review needed.' : 'It will show as Verified once an admin confirms it.'}
         </Text>
         <TouchableOpacity style={styles.button} onPress={onDone}>
-          <Text style={styles.buttonText}>Back to dues</Text>
+          <Text style={styles.buttonText}>{isCash ? 'Back to dashboard' : 'Back to dues'}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -121,9 +132,11 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>Pay for {house.house_number}</Text>
+        <Text style={styles.title}>{isCash ? `Record cash payment for ${house.house_number}` : `Pay for ${house.house_number}`}</Text>
         <Text style={styles.subtitle}>
-          Pay for one or more full months - partial-month amounts are not accepted.
+          {isCash
+            ? "Only for cash actually received in hand - this is recorded as already Verified immediately, no separate review step."
+            : 'Pay for one or more full months - partial-month amounts are not accepted.'}
         </Text>
 
         {selectedPeriods && selectedPeriods.length > 0 ? (
@@ -151,23 +164,27 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
           editable={!submitting}
         />
 
-        <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
-          <Text style={styles.upiButtonText}>Pay via UPI app</Text>
-        </TouchableOpacity>
+        {isCash ? null : (
+          <>
+            <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
+              <Text style={styles.upiButtonText}>Pay via UPI app</Text>
+            </TouchableOpacity>
 
-        <Text style={styles.label}>UTR / reference number</Text>
-        <Text style={styles.helper}>
-          After paying, copy the 12-digit UTR (or reference number) from your UPI app's
-          confirmation screen and paste it here.
-        </Text>
-        <TextInput
-          style={styles.input}
-          placeholder="e.g. 402512345678"
-          autoCapitalize="characters"
-          value={utrNumber}
-          onChangeText={setUtrNumber}
-          editable={!submitting}
-        />
+            <Text style={styles.label}>UTR / reference number</Text>
+            <Text style={styles.helper}>
+              After paying, copy the 12-digit UTR (or reference number) from your UPI app's
+              confirmation screen and paste it here.
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. 402512345678"
+              autoCapitalize="characters"
+              value={utrNumber}
+              onChangeText={setUtrNumber}
+              editable={!submitting}
+            />
+          </>
+        )}
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -176,7 +193,11 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, o
           onPress={handleSubmit}
           disabled={submitting}
         >
-          {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Submit payment</Text>}
+          {submitting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>{isCash ? 'Record cash payment' : 'Submit payment'}</Text>
+          )}
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.cancelButton} onPress={onCancel} disabled={submitting}>

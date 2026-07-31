@@ -84,6 +84,7 @@ async function main() {
   const committeeMember = await post('/members', adminToken, {
     society_id: SOCIETY_ID,
     email: committeeEmail,
+    name: 'Test Committee Member',
     password: committeePassword,
     is_committee_member: true,
   });
