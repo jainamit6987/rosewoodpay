@@ -87,6 +87,7 @@ async function main() {
     amount: 3500,
     utr_number: `${testUtr}NOPAYEE`,
     transaction_type: 'UtilityBill',
+    description: 'July electricity bill',
   });
   check(
     'missing payee_name is rejected (400)',
@@ -94,11 +95,25 @@ async function main() {
     missingPayee
   );
 
+  const missingDescription = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 3500,
+    utr_number: `${testUtr}NODESC`,
+    transaction_type: 'UtilityBill',
+    payee_name: 'BEST Electricity',
+  });
+  check(
+    'missing description is rejected (400)',
+    missingDescription.status === 400 && /description/i.test(missingDescription.body.error || ''),
+    missingDescription
+  );
+
   const missingSociety = await post('/transactions', adminToken, {
     amount: 3500,
     utr_number: `${testUtr}NOSOCIETY`,
     transaction_type: 'Salary',
     payee_name: 'Ramesh - Security Guard',
+    description: 'June salary',
   });
   check(
     'missing society_id is rejected (400)',
@@ -113,11 +128,42 @@ async function main() {
     utr_number: `${testUtr}WITHHOUSE`,
     transaction_type: 'UtilityBill',
     payee_name: 'BEST Electricity',
+    description: 'July electricity bill',
   });
   check(
     'providing house_id for an expense type is rejected (400)',
     withHouseId.status === 400 && /house_id must not be provided/i.test(withHouseId.body.error || ''),
     withHouseId
+  );
+
+  const invalidMode = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 3500,
+    utr_number: `${testUtr}BADMODE`,
+    transaction_type: 'UtilityBill',
+    payee_name: 'BEST Electricity',
+    description: 'July electricity bill',
+    payment_mode: 'Bitcoin',
+  });
+  check(
+    'an unrecognized payment_mode is rejected (400)',
+    invalidMode.status === 400 && /payment_mode must be one of/i.test(invalidMode.body.error || ''),
+    invalidMode
+  );
+
+  const nonCashModeMissingRef = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 3500,
+    transaction_type: 'UtilityBill',
+    payee_name: 'BEST Electricity',
+    description: 'July electricity bill',
+    payment_mode: 'NEFT_IMPS',
+  });
+  check(
+    'NEFT_IMPS with no reference number/proof is rejected (400)',
+    nonCashModeMissingRef.status === 400 &&
+      /utr_number, raw_shared_payload, or proof_file_path/i.test(nonCashModeMissingRef.body.error || ''),
+    nonCashModeMissingRef
   );
 
   // --- Admin-only ---
@@ -127,6 +173,7 @@ async function main() {
     utr_number: `${testUtr}RESIDENT`,
     transaction_type: 'UtilityBill',
     payee_name: 'BEST Electricity',
+    description: 'July electricity bill',
   });
   check(
     'a resident (not an Admin) cannot submit a society expense, even with an active house assignment (403)',
@@ -141,12 +188,15 @@ async function main() {
     utr_number: `${testUtr}UTILITY`,
     transaction_type: 'UtilityBill',
     payee_name: 'BEST Electricity',
+    description: 'July electricity bill',
   });
   check(
-    'Admin recording a UtilityBill expense succeeds (201), house_id null, no allocations, already Verified',
+    'Admin recording a UtilityBill expense succeeds (201), house_id null, no allocations, already Verified, defaults to UPI mode',
     utilityBill.status === 201 &&
       utilityBill.body.house_id === null &&
       utilityBill.body.payee_name === 'BEST Electricity' &&
+      utilityBill.body.description === 'July electricity bill' &&
+      utilityBill.body.payment_mode === 'UPI' &&
       Array.isArray(utilityBill.body.allocations) &&
       utilityBill.body.allocations.length === 0 &&
       utilityBill.body.processing_status === 'Verified' &&
@@ -162,6 +212,7 @@ async function main() {
     raw_shared_payload: 'Cash paid to security guard for June, receipt signed.',
     transaction_type: 'Salary',
     payee_name: 'Ramesh - Security Guard',
+    description: 'June salary',
   });
   check(
     'Admin recording a Salary expense with no UTR (proof via raw_shared_payload) succeeds (201), already Verified',
@@ -170,6 +221,65 @@ async function main() {
       salary.body.house_id === null &&
       salary.body.processing_status === 'Verified',
     salary.body
+  );
+
+  // --- Happy path: Admin records an expense paid in Cash - now allowed for
+  // expenses too (previously Cash was Maintenance-only), and needs no
+  // reference number at all, same as an Admin-recorded Cash Maintenance
+  // payment.
+  const cashExpense = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 500,
+    transaction_type: 'Other',
+    payment_mode: 'Cash',
+    payee_name: 'Local milk vendor',
+    description: 'Milk for society office, July',
+  });
+  check(
+    'Admin recording a Cash expense with no reference number succeeds (201), payment_mode=Cash, already Verified',
+    cashExpense.status === 201 &&
+      cashExpense.body.payment_mode === 'Cash' &&
+      cashExpense.body.utr_number === null &&
+      cashExpense.body.processing_status === 'Verified',
+    cashExpense.body
+  );
+
+  // --- Happy path: Admin records an expense paid by cheque, reference
+  // number stored under utr_number (the one general-purpose reference
+  // column, regardless of mode).
+  const chequeExpense = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 8000,
+    utr_number: `${testUtr}CHEQUE`,
+    transaction_type: 'Other',
+    payment_mode: 'Cheque',
+    payee_name: 'ABC Decorators',
+    description: 'Diwali decoration contractor',
+  });
+  check(
+    'Admin recording a Cheque expense with a cheque number succeeds (201), payment_mode=Cheque',
+    chequeExpense.status === 201 &&
+      chequeExpense.body.payment_mode === 'Cheque' &&
+      chequeExpense.body.utr_number === `${testUtr}CHEQUE`,
+    chequeExpense.body
+  );
+
+  // --- Happy path: Admin records an expense paid via NEFT/IMPS.
+  const neftExpense = await post('/transactions', adminToken, {
+    society_id: SOCIETY_ID,
+    amount: 15000,
+    utr_number: `${testUtr}NEFT`,
+    transaction_type: 'Salary',
+    payment_mode: 'NEFT_IMPS',
+    payee_name: 'XYZ Security Agency',
+    description: 'July security guard payment',
+  });
+  check(
+    'Admin recording a NEFT_IMPS expense with a reference number succeeds (201), payment_mode=NEFT_IMPS',
+    neftExpense.status === 201 &&
+      neftExpense.body.payment_mode === 'NEFT_IMPS' &&
+      neftExpense.body.utr_number === `${testUtr}NEFT`,
+    neftExpense.body
   );
 
   // --- DB-level enforcement, independent of the app layer: a raw insert
@@ -184,6 +294,7 @@ async function main() {
     amount: 500,
     transaction_type: 'Other',
     payee_name: 'Should never be allowed',
+    description: 'test',
     utr_number: `${testUtr}RAWBAD`, // utr_number is VARCHAR(32) - stay within that, not just readable
   });
   check(
@@ -198,12 +309,45 @@ async function main() {
     submitted_by: '00000001-0000-0000-0000-000000000001',
     amount: 500,
     transaction_type: 'Other',
+    description: 'test',
     utr_number: `${testUtr}RAWNOPAY`, // utr_number is VARCHAR(32) - stay within that, not just readable
   });
   check(
     'a raw DB insert of a non-Maintenance type with no payee_name violates the CHECK constraint',
     !!rawInsertNoPayeeError && /chk_payee_name_required_for_expenses/i.test(rawInsertNoPayeeError.message || ''),
     rawInsertNoPayeeError
+  );
+
+  const { error: rawInsertNoDescriptionError } = await supabaseAdmin.from('transactions').insert({
+    society_id: SOCIETY_ID,
+    house_id: null,
+    submitted_by: '00000001-0000-0000-0000-000000000001',
+    amount: 500,
+    transaction_type: 'Other',
+    payee_name: 'Should never be allowed',
+    utr_number: `${testUtr}RAWNODSC`, // utr_number is VARCHAR(32) - stay within that, not just readable
+  });
+  check(
+    'a raw DB insert of a non-Maintenance type with no description violates the CHECK constraint',
+    !!rawInsertNoDescriptionError && /chk_description_required_for_expenses/i.test(rawInsertNoDescriptionError.message || ''),
+    rawInsertNoDescriptionError
+  );
+
+  const { error: rawInsertBadModeError } = await supabaseAdmin.from('transactions').insert({
+    society_id: SOCIETY_ID,
+    house_id: null,
+    submitted_by: '00000001-0000-0000-0000-000000000001',
+    amount: 500,
+    transaction_type: 'Other',
+    payee_name: 'Should never be allowed',
+    description: 'test',
+    payment_mode: 'Bitcoin',
+    utr_number: `${testUtr}RAWBADMD`, // utr_number is VARCHAR(32) - stay within that, not just readable
+  });
+  check(
+    'a raw DB insert with an unrecognized payment_mode violates the chk_payment_mode CHECK constraint',
+    !!rawInsertBadModeError && /chk_payment_mode/i.test(rawInsertBadModeError.message || ''),
+    rawInsertBadModeError
   );
 
   // --- Never shows up in the admin review queue - it's already Verified,
@@ -263,14 +407,17 @@ async function main() {
 
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
-  // Cleanup. The Salary row has no utr_number (its proof is
-  // raw_shared_payload instead), so it needs an explicit id-based delete -
-  // the utr_number-pattern delete below would never catch it.
-  await supabaseAdmin.from('audit_events').delete().in('entity_id', [utilityBill.body.id, salary.body.id]);
+  // Cleanup. The Salary and Cash rows have no utr_number (proof is
+  // raw_shared_payload for Salary, nothing at all for Cash - same as an
+  // Admin-recorded Cash Maintenance payment), so they need an explicit
+  // id-based delete - the utr_number-pattern delete below would never
+  // catch either.
+  const createdIds = [utilityBill.body.id, salary.body.id, cashExpense.body.id, chequeExpense.body.id, neftExpense.body.id].filter(
+    Boolean
+  );
+  await supabaseAdmin.from('audit_events').delete().in('entity_id', createdIds);
   await supabaseAdmin.from('transactions').delete().like('utr_number', 'TESTEXPENSE%');
-  if (salary.body.id) {
-    await supabaseAdmin.from('transactions').delete().eq('id', salary.body.id);
-  }
+  await supabaseAdmin.from('transactions').delete().in('id', createdIds);
 
   process.exit(failCount > 0 ? 1 : 0);
 }

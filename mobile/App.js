@@ -20,6 +20,9 @@ import HouseTransactionsScreen from './src/screens/HouseTransactionsScreen';
 import MembersScreen from './src/screens/MembersScreen';
 import CreateMemberScreen from './src/screens/CreateMemberScreen';
 import MemberDetailScreen from './src/screens/MemberDetailScreen';
+import PendencyReportScreen from './src/screens/PendencyReportScreen';
+import TransactionReportScreen from './src/screens/TransactionReportScreen';
+import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -75,6 +78,16 @@ function AuthenticatedApp() {
   // effectiveMode below) - reachable only from there, once effectiveMode is
   // already 'admin', so there is no separate access check needed here.
   const [showSociety, setShowSociety] = useState(false);
+  // Drill-down from a specific society card on SocietyScreen (see that
+  // screen's own "View Pendency Report" link) - a whole society object,
+  // not just an id, since PendencyReportScreen needs its name for the
+  // report header/export title and SocietyScreen already has the full
+  // object in hand from its own GET /society call.
+  const [pendencyReportTarget, setPendencyReportTarget] = useState(null);
+  // Same shape/reasoning as pendencyReportTarget above - a second,
+  // independent spoke off the same society card on SocietyScreen (see that
+  // screen's own report tiles), not a variant of the pendency report.
+  const [transactionReportTarget, setTransactionReportTarget] = useState(null);
   const [showHouses, setShowHouses] = useState(false);
   const [showReviewQueue, setShowReviewQueue] = useState(false);
   // Members hub spokes off AdminHomeScreen, same shape as showHouses/
@@ -87,6 +100,12 @@ function AuthenticatedApp() {
   const [showMembers, setShowMembers] = useState(false);
   const [showCreateMember, setShowCreateMember] = useState(false);
   const [memberDetailTarget, setMemberDetailTarget] = useState(null);
+  // Another AdminHomeScreen spoke, same "just a boolean, no target object"
+  // shape as showHouses/showMembers - a society-level expense has no
+  // existing record to carry through either, just society_id (derived
+  // from membership below, not stored here), same reasoning as
+  // showCreateMember above.
+  const [showRecordExpense, setShowRecordExpense] = useState(false);
   // null = no explicit choice made yet. Only matters when both resident and
   // admin/committee access are available - see hasResidentAccess/
   // hasAdminAccess below; when only one applies there is nothing to choose
@@ -243,8 +262,29 @@ function AuthenticatedApp() {
     return <MyTransactionsScreen onBack={() => setShowMyTransactions(false)} />;
   }
 
+  // Checked before showSociety below - a drill-down set on top of it, same
+  // "clearing this one piece of state falls back to whichever screen
+  // underneath is still set" shape as memberDetailTarget/houseDashboardTarget.
+  if (pendencyReportTarget) {
+    return (
+      <PendencyReportScreen society={pendencyReportTarget} onBack={() => setPendencyReportTarget(null)} />
+    );
+  }
+
+  if (transactionReportTarget) {
+    return (
+      <TransactionReportScreen society={transactionReportTarget} onBack={() => setTransactionReportTarget(null)} />
+    );
+  }
+
   if (showSociety) {
-    return <SocietyScreen onBack={() => setShowSociety(false)} />;
+    return (
+      <SocietyScreen
+        onBack={() => setShowSociety(false)}
+        onViewPendencyReport={setPendencyReportTarget}
+        onViewTransactionReport={setTransactionReportTarget}
+      />
+    );
   }
 
   if (showHouses) {
@@ -271,6 +311,16 @@ function AuthenticatedApp() {
     );
   }
 
+  if (showRecordExpense) {
+    return (
+      <RecordExpenseScreen
+        societyId={membership.society?.id}
+        onDone={() => setShowRecordExpense(false)}
+        onCancel={() => setShowRecordExpense(false)}
+      />
+    );
+  }
+
   if (showReviewQueue) {
     return <AdminReviewScreen onBack={() => setShowReviewQueue(false)} />;
   }
@@ -285,6 +335,7 @@ function AuthenticatedApp() {
     return (
       <AdminHomeScreen
         onReviewPayments={() => setShowReviewQueue(true)}
+        onRecordExpense={() => setShowRecordExpense(true)}
         onViewHouses={() => setShowHouses(true)}
         onViewMembers={() => setShowMembers(true)}
         onViewSociety={() => setShowSociety(true)}

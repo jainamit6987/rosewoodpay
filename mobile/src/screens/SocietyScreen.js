@@ -38,7 +38,7 @@ function statusTextStyle(status) {
 // multi-society Admin/Committee member is handled for free, matching how
 // GET /transactions/mine's list rendering never assumed "exactly one house"
 // either.
-export default function SocietyScreen({ onBack }) {
+export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTransactionReport }) {
   const { accessToken } = useAuth();
   const [societies, setSocieties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -132,6 +132,23 @@ export default function SocietyScreen({ onBack }) {
             <Text style={styles.detailLabel}>Registered on</Text>
             <Text style={styles.detailValue}>{formatDate(society.created_at)}</Text>
           </View>
+
+          {onViewPendencyReport || onViewTransactionReport ? (
+            <View style={styles.reportGrid}>
+              {onViewPendencyReport ? (
+                <TouchableOpacity style={styles.reportTile} onPress={() => onViewPendencyReport(society)}>
+                  <Text style={styles.reportTileTitle}>Pendency Report</Text>
+                  <Text style={styles.reportTileSummary}>Who still owes dues →</Text>
+                </TouchableOpacity>
+              ) : null}
+              {onViewTransactionReport ? (
+                <TouchableOpacity style={styles.reportTile} onPress={() => onViewTransactionReport(society)}>
+                  <Text style={styles.reportTileTitle}>Transaction Report</Text>
+                  <Text style={styles.reportTileSummary}>Society ledger by month →</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       ))}
     </ScrollView>
@@ -234,6 +251,32 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#1c1c1e',
+  },
+  reportGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 14,
+  },
+  reportTile: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    backgroundColor: '#f5f5f7',
+    borderRadius: 10,
+    padding: 14,
+    minHeight: 70,
+    justifyContent: 'center',
+  },
+  reportTileTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1c1c1e',
+  },
+  reportTileSummary: {
+    fontSize: 12,
+    color: '#1a73e8',
+    fontWeight: '600',
+    marginTop: 4,
   },
   badge: {
     paddingHorizontal: 8,

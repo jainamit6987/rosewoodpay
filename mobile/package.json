@@ -5,8 +5,11 @@
   "dependencies": {
     "@expo/metro-runtime": "~57.0.7",
     "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/datetimepicker": "9.1.0",
     "@supabase/supabase-js": "^2.110.8",
     "expo": "~57.0.8",
+    "expo-print": "~57.0.1",
+    "expo-sharing": "~57.0.8",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",

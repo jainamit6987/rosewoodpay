@@ -1,9 +1,16 @@
 // Verifies the payment_mode column added in
 // 20260731000000_add_payment_mode_to_transactions.sql and the matching
 // app-layer rules in routes/transactions.js's POST / handler:
-//   - payment_mode defaults to 'UPI' and must be one of UPI/Cash.
-//   - 'Cash' is Admin-only (not Committee, not the resident themselves,
-//     even for their own house) and only valid for Maintenance payments.
+//   - payment_mode defaults to 'UPI' and must be one of UPI/Cash/NEFT_IMPS/
+//     Cheque (the latter two added in 20260802000000_extend_expense_
+//     payment_modes_and_description.sql).
+//   - For a Maintenance payment specifically, 'Cash' is Admin-only (not
+//     Committee, not the resident themselves, even for their own house).
+//     Cash is no longer restricted to Maintenance only, as it originally
+//     was here - see that same 20260802000000 migration's own comment for
+//     the "society itself can also pay someone in cash" reasoning; that
+//     combination (Cash + a society expense) is covered in
+//     test-society-expenses.js instead, not duplicated below.
 //   - 'Cash' needs no utr_number/raw_shared_payload/proof_file_path.
 //   - 'Cash' is auto-Verified immediately (processing_status/payment_
 //     status/verified_by/verified_at all set at insert time, no separate
@@ -133,19 +140,6 @@ async function main() {
     payment_mode: 'Card',
   });
   check('an unrecognized payment_mode is rejected (400)', badMode.status === 400, badMode);
-
-  const cashWithWrongType = await post('/transactions', adminToken, {
-    society_id: SOCIETY_ID,
-    amount: 999,
-    payment_mode: 'Cash',
-    transaction_type: 'UtilityBill',
-    payee_name: 'Test Vendor',
-  });
-  check(
-    'Cash combined with a non-Maintenance transaction_type is rejected (400)',
-    cashWithWrongType.status === 400 && /only valid for Maintenance/i.test(cashWithWrongType.body.error || ''),
-    cashWithWrongType
-  );
 
   // --- The actual happy path: Admin records a Cash payment for this
   // resident's dues, with no utr_number/proof/payload at all. ---

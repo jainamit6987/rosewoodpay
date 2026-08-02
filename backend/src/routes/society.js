@@ -376,7 +376,192 @@ router.get('/:id/pendency-report', authenticate, async (req, res) => {
 
   const houses = [...houseMap.values()].sort((a, b) => (a.house_number ?? '').localeCompare(b.house_number ?? ''));
 
+  // Per-house "last payment" context for the report/export - added
+  // alongside the still-owed columns above rather than a separate
+  // endpoint, since the whole point of a shareable pendency report is
+  // showing "here's what they owe" next to "here's what they last paid",
+  // not just the former. Same txn_date-preferred-for-display/
+  // verified_at-for-ordering logic as GET /me and the house dashboard (see
+  // routes/houses.js's own note: txn_date is resident-supplied and
+  // optional, so it is safe to display but not to sort/pick by). Only
+  // fetched for houses actually in this report - a fully-paid house is
+  // already omitted above and has no reason to pay for this extra query.
+  const houseIds = houses.map((h) => h.house_id);
+  if (houseIds.length > 0) {
+    const { data: verifiedTxns, error: verifiedTxnsError } = await supabase
+      .from('transactions')
+      .select('house_id, amount, txn_date, verified_at, transaction_allocations(billing_periods(period_month))')
+      .in('house_id', houseIds)
+      .eq('processing_status', 'Verified')
+      .order('verified_at', { ascending: false });
+
+    if (verifiedTxnsError) {
+      return res.status(500).json({ error: verifiedTxnsError.message });
+    }
+
+    // Reduce to the single most-recent Verified transaction per house (the
+    // query above is already newest-first, so the first one seen per
+    // house_id wins) - same "pick one row per group in JS" approach GET
+    // /me already uses for the same reason (no clean "latest per group"
+    // shortcut via PostgREST).
+    const lastTxnByHouse = new Map();
+    for (const txn of verifiedTxns || []) {
+      if (!lastTxnByHouse.has(txn.house_id)) {
+        lastTxnByHouse.set(txn.house_id, txn);
+      }
+    }
+
+    for (const entry of houses) {
+      const lastTxn = lastTxnByHouse.get(entry.house_id);
+      if (!lastTxn) {
+        entry.lastPayment = null;
+        entry.lastPaidBillingPeriod = null;
+        continue;
+      }
+      entry.lastPayment = { amount: lastTxn.amount, date: lastTxn.txn_date || lastTxn.verified_at };
+      // "Last paid billing period" is the most recent month that last
+      // payment actually covered - a single payment can cover more than
+      // one month at once (FIFO allocation), so this takes the latest of
+      // its own allocations rather than assuming exactly one.
+      const coveredMonths = (lastTxn.transaction_allocations || [])
+        .map((allocation) => allocation.billing_periods?.period_month)
+        .filter(Boolean);
+      entry.lastPaidBillingPeriod = coveredMonths.length > 0 ? coveredMonths.sort().at(-1) : null;
+    }
+  }
+
   res.json({ month: targetMonth, houses });
+});
+
+// Plain English month name lookup for the description this endpoint
+// synthesizes for Maintenance rows (below) - not locale-aware on purpose,
+// unlike the mobile client's own Intl.toLocaleDateString formatting, since
+// this is a JSON API response, not something rendered for display
+// directly; the mobile client is free to reformat the raw period_month
+// values it also receives if it ever wants to.
+const MONTH_NAMES = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+// period_month is a plain 'YYYY-MM-DD' date-only string - parsed as UTC
+// parts directly (no Date object) to sidestep any timezone rollback, same
+// reasoning as every other period_month display helper in this codebase.
+function formatPeriodMonthLabel(periodMonth) {
+  const [year, month] = periodMonth.split('-').map(Number);
+  return `${MONTH_NAMES[month - 1]} ${year}`;
+}
+
+// GET /society/:id/transaction-report?month=YYYY-MM - Admin or Committee
+// (same view-only split as every other report in this file). The "view
+// transaction report at society level" ask: a flat, whole-society ledger
+// for a chosen calendar month - every Verified transaction (money that
+// actually moved, in either direction), not the full-history/any-status
+// GET /transactions/report listing (that one is filterable but has no
+// single-dimension month filter and returns every processing_status,
+// which is the wrong shape for a bookkeeping ledger someone reads
+// month-by-month).
+//
+// Filtered on verified_at, not the resident/Admin-supplied txn_date -
+// same reasoning as GET /transactions/report's own from/to filter and
+// the pendency-report's "last payment" lookup above: txn_date is
+// optional and can be silently NULL, but every Verified row always has a
+// verified_at (set the moment it becomes Verified, either via
+// POST /:id/verify or immediately on insert for a society expense - see
+// routes/transactions.js), so it is the one date guaranteed present for
+// every row this report needs to include. txn_date, when present, is
+// still what gets *displayed* as the transaction date below - it is only
+// unsafe as a filter, not as a display value.
+//
+// Cr/Dr is derived from transaction_type: Maintenance is a resident
+// paying the society (money in, Cr); UtilityBill/Salary/Other are the
+// society paying someone else (money out, Dr) - the same split already
+// established by the "two entirely separate paths" comment on POST /
+// in routes/transactions.js.
+//
+// description is synthesized rather than read from a column for
+// Maintenance rows specifically: those never have transactions.description
+// set (only society expenses require it - see the chk_description_required
+// constraint), so this fills in "House <no> - <billing period(s)>" from
+// the same house/allocation data the pendency report already embeds,
+// covering the multiple-months-in-one-payment case as a comma-joined list.
+// Expense rows already carry a real description, used as-is.
+router.get('/:id/transaction-report', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { month } = req.query;
+
+  let callerAllowed;
+  try {
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerAllowed) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the transaction report.' });
+  }
+
+  let targetMonth;
+  if (month !== undefined) {
+    if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+      return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+    }
+    targetMonth = month;
+  } else {
+    const now = startOfCurrentMonthUtc();
+    targetMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  const rangeStart = new Date(`${targetMonth}-01T00:00:00.000Z`);
+  const rangeEnd = addMonths(rangeStart, 1);
+
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('transactions')
+    .select(
+      'id, house_id, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, verified_at, houses(house_number), transaction_allocations(billing_periods(period_month))'
+    )
+    .eq('society_id', societyId)
+    .eq('processing_status', 'Verified')
+    .gte('verified_at', rangeStart.toISOString())
+    .lt('verified_at', rangeEnd.toISOString())
+    .order('verified_at', { ascending: true });
+
+  if (transactionsError) {
+    return res.status(500).json({ error: transactionsError.message });
+  }
+
+  const rows = (transactions || []).map((txn) => {
+    const isMaintenance = txn.transaction_type === 'Maintenance';
+    let description;
+    if (isMaintenance) {
+      const coveredMonths = [
+        ...new Set(
+          (txn.transaction_allocations || [])
+            .map((allocation) => allocation.billing_periods?.period_month)
+            .filter(Boolean)
+        ),
+      ].sort();
+      const houseLabel = txn.houses?.house_number ? `House ${txn.houses.house_number}` : 'House \u2014';
+      description =
+        coveredMonths.length > 0
+          ? `${houseLabel} - ${coveredMonths.map(formatPeriodMonthLabel).join(', ')}`
+          : houseLabel;
+    } else {
+      description = txn.description || '\u2014';
+    }
+
+    return {
+      id: txn.id,
+      txn_date: txn.txn_date || txn.verified_at,
+      utr_number: txn.utr_number,
+      payment_mode: txn.payment_mode,
+      transaction_type: txn.transaction_type,
+      direction: isMaintenance ? 'Cr' : 'Dr',
+      amount: txn.amount,
+      description,
+    };
+  });
+
+  res.json({ month: targetMonth, transactions: rows });
 });
 
 // POST /society/:id/billing-periods/generate-next-month - Admin-only. The

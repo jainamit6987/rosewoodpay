@@ -20,12 +20,14 @@ const PG_INSUFFICIENT_PRIVILEGE = '42501';
 const TRANSACTION_TYPES = ['Maintenance', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
 
-// Kept in sync with the chk_payment_mode CHECK constraint added in
-// 20260731000000_add_payment_mode_to_transactions.sql. UPI is every
-// existing/default row (a resident self-reporting their own UPI payment);
-// Cash is the one narrower case this file adds special-case handling for
-// below - see that migration's own comment for the full reasoning.
-const PAYMENT_MODES = ['UPI', 'Cash'];
+// Kept in sync with the chk_payment_mode CHECK constraint, extended in
+// 20260802000000_extend_expense_payment_modes_and_description.sql. UPI is
+// every existing/default row (a resident self-reporting their own UPI
+// payment); Cash/NEFT_IMPS/Cheque can each apply to a resident's
+// Maintenance payment OR a society-level expense - see that migration's
+// own comment for the full reasoning on why Cash is no longer
+// Maintenance-only.
+const PAYMENT_MODES = ['UPI', 'Cash', 'NEFT_IMPS', 'Cheque'];
 const CASH_MODE = 'Cash';
 
 // Kept in sync with the chk_processing_status CHECK constraint in the
@@ -81,6 +83,7 @@ router.post('/', authenticate, async (req, res) => {
     transaction_type,
     payee_name,
     payment_mode,
+    description,
   } = req.body || {};
 
   if (amount === undefined || amount === null) {
@@ -120,17 +123,6 @@ router.post('/', authenticate, async (req, res) => {
     });
   }
 
-  // Cash is specifically for an Admin recording a resident's in-person cash
-  // payment against their dues - it has no place in the society-level
-  // expense path just below (those are the society paying someone else,
-  // already always Admin-only and always auto-Verified regardless of this
-  // field) or with any other transaction_type.
-  if (resolvedPaymentMode === CASH_MODE && resolvedTransactionType !== MAINTENANCE_TYPE) {
-    return res.status(400).json({
-      error: 'payment_mode "Cash" is only valid for Maintenance payments.',
-    });
-  }
-
   const supabase = req.supabase;
 
   // UtilityBill/Salary/Other are society-level expenses - the society
@@ -164,6 +156,11 @@ router.post('/', authenticate, async (req, res) => {
     if (!payee_name || typeof payee_name !== 'string' || !payee_name.trim()) {
       return res.status(400).json({
         error: 'payee_name is required for non-Maintenance transactions (who or what was paid).',
+      });
+    }
+    if (!description || typeof description !== 'string' || !description.trim()) {
+      return res.status(400).json({
+        error: 'description is required for non-Maintenance transactions (what this payment was for).',
       });
     }
 
@@ -202,7 +199,9 @@ router.post('/', authenticate, async (req, res) => {
         proof_file_path: proof_file_path || null,
         txn_date: txn_date || null,
         transaction_type: resolvedTransactionType,
+        payment_mode: resolvedPaymentMode,
         payee_name: payee_name.trim(),
+        description: description.trim(),
         processing_status: 'Verified',
         payment_status: 'Success',
         verified_by: req.user.id,
@@ -213,7 +212,7 @@ router.post('/', authenticate, async (req, res) => {
 
     if (insertError) {
       if (insertError.code === PG_UNIQUE_VIOLATION) {
-        return res.status(409).json({ error: 'This UTR has already been submitted for this society.' });
+        return res.status(409).json({ error: 'This reference number has already been submitted for this society.' });
       }
       if (insertError.code === PG_INSUFFICIENT_PRIVILEGE || insertError.message?.includes('row-level security')) {
         return res.status(403).json({ error: 'Not allowed to record this expense.' });
@@ -230,7 +229,9 @@ router.post('/', authenticate, async (req, res) => {
       metadata: {
         amount: transaction.amount,
         utr_number: transaction.utr_number,
+        payment_mode: transaction.payment_mode,
         payee_name: transaction.payee_name,
+        description: transaction.description,
         transaction_type: transaction.transaction_type,
         auto_verified: true,
       },
@@ -442,6 +443,7 @@ router.post('/', authenticate, async (req, res) => {
       txn_date: txn_date || null,
       transaction_type: resolvedTransactionType,
       payment_mode: resolvedPaymentMode,
+      description: description ? description.trim() : null,
       ...(resolvedPaymentMode === CASH_MODE
         ? {
             processing_status: 'Verified',
@@ -456,7 +458,7 @@ router.post('/', authenticate, async (req, res) => {
 
   if (insertError) {
     if (insertError.code === PG_UNIQUE_VIOLATION) {
-      return res.status(409).json({ error: 'This UTR has already been submitted for this society.' });
+      return res.status(409).json({ error: 'This reference number has already been submitted for this society.' });
     }
     if (insertError.code === PG_INSUFFICIENT_PRIVILEGE || insertError.message?.includes('row-level security')) {
       return res.status(403).json({

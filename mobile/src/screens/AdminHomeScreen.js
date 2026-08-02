@@ -17,7 +17,7 @@ import { useAuth } from '../context/AuthContext';
 // screen for this mode has Sign out" convention DuesScreen already
 // established on the resident side (BillingHistoryScreen/MyTransactionsScreen
 // don't have one either).
-export default function AdminHomeScreen({ onReviewPayments, onViewHouses, onViewMembers, onViewSociety, onSwitchToResident, onLogout }) {
+export default function AdminHomeScreen({ onReviewPayments, onRecordExpense, onViewHouses, onViewMembers, onViewSociety, onSwitchToResident, onLogout }) {
   const { accessToken } = useAuth();
   const [societyName, setSocietyName] = useState(null);
   const [houseCount, setHouseCount] = useState(null);
@@ -103,6 +103,10 @@ export default function AdminHomeScreen({ onReviewPayments, onViewHouses, onView
         <TouchableOpacity style={styles.tile} onPress={onReviewPayments}>
           <Text style={styles.tileTitle}>Review Payments</Text>
           <Text style={styles.tileSummary}>{pendingCount} pending</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.tile} onPress={onRecordExpense}>
+          <Text style={styles.tileTitle}>Record Expense</Text>
+          <Text style={styles.tileSummary}>Salary, bills & more</Text>
         </TouchableOpacity>
       </View>
 

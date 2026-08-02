@@ -19,6 +19,7 @@ const supabaseAdmin = require('../src/config/supabaseAdmin');
 const BASE_URL = `http://localhost:${env.port}`;
 const SOCIETY_ID = '00000003-0000-0000-0000-000000000003';
 const HOUSE_A101_RESIDENT = '00000006-0000-0000-0000-000000000006';
+const RESIDENT_MEMBER_ID = '00000005-0000-0000-0000-000000000005';
 const HOUSE_C303_ARREARS = '0000000f-0000-0000-0000-00000000000f';
 
 let passCount = 0;
@@ -207,6 +208,132 @@ async function main() {
     farPastReport.body
   );
 
+  // --- lastPayment / lastPaidBillingPeriod: a throwaway house with an
+  //     older period paid off (via a Cash payment, which auto-Verifies
+  //     immediately - see test-cash-payment.js) and a still-Open current
+  //     month period. Isolated from every shared seeded fixture, same
+  //     reasoning as paidHouse above, so this never depends on (or risks
+  //     further drifting) C-303's own already-drifted history. ---
+  const LAST_PAYMENT_AMOUNT = 1500;
+  const lastPaymentHouseTag = `TESTPENDLP${Date.now()}`.slice(0, 20);
+  const { data: lastPaymentHouse, error: lastPaymentHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({
+      society_id: SOCIETY_ID,
+      house_number: lastPaymentHouseTag,
+      type: 'Flat',
+      default_monthly_amount: LAST_PAYMENT_AMOUNT,
+    })
+    .select('id')
+    .single();
+  if (lastPaymentHouseError) {
+    console.error('setup failed: could not create the lastPayment throwaway house', lastPaymentHouseError.message);
+  }
+  const oldPeriodMonth = `${monthString(2)}-01`;
+  const { error: oldPeriodError } = await supabaseAdmin.from('billing_periods').insert({
+    society_id: SOCIETY_ID,
+    house_id: lastPaymentHouse.id,
+    period_month: oldPeriodMonth,
+    base_amount: LAST_PAYMENT_AMOUNT,
+    amount_due: LAST_PAYMENT_AMOUNT,
+    status: 'Open',
+  });
+  const { error: currentPeriodError2 } = await supabaseAdmin.from('billing_periods').insert({
+    society_id: SOCIETY_ID,
+    house_id: lastPaymentHouse.id,
+    period_month: currentPeriodMonth,
+    base_amount: LAST_PAYMENT_AMOUNT,
+    amount_due: LAST_PAYMENT_AMOUNT,
+    status: 'Open',
+  });
+  if (oldPeriodError || currentPeriodError2) {
+    console.error(
+      'setup failed: could not create the lastPayment throwaway house\'s periods',
+      (oldPeriodError || currentPeriodError2).message
+    );
+  }
+  // POST /transactions requires the target house to have at least one
+  // Active assignment (see routes/transactions.js's own "No active house
+  // assignment visible" check) even for an Admin submitting a Cash
+  // payment on the resident's behalf - same setup test-cash-payment.js
+  // already needs for the identical reason.
+  await supabaseAdmin.from('resident_house_assignments').insert({
+    society_member_id: RESIDENT_MEMBER_ID,
+    house_id: lastPaymentHouse.id,
+    status: 'Active',
+    approved_at: new Date().toISOString(),
+  });
+  // FIFO allocates this to the older (oldest-first) period, fully covering
+  // and closing it - leaving only the current-month period still Open.
+  const lastPaymentTxn = await post('/transactions', adminToken, {
+    house_id: lastPaymentHouse.id,
+    amount: LAST_PAYMENT_AMOUNT,
+    payment_mode: 'Cash',
+  });
+  check(
+    'setup: the Cash payment against the lastPayment throwaway house succeeds and auto-Verifies',
+    lastPaymentTxn.status === 201,
+    lastPaymentTxn.body
+  );
+
+  // --- A second throwaway house with an Open period but zero payment
+  //     history at all - the "never paid anything" case this same pair of
+  //     fields must report as null, not some default/zero value. ---
+  const noPaymentHouseTag = `TESTPENDNP${Date.now()}`.slice(0, 20);
+  const { data: noPaymentHouse, error: noPaymentHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: noPaymentHouseTag, type: 'Flat', default_monthly_amount: 1700 })
+    .select('id')
+    .single();
+  if (noPaymentHouseError) {
+    console.error('setup failed: could not create the no-payment throwaway house', noPaymentHouseError.message);
+  }
+  const { error: noPaymentPeriodError } = await supabaseAdmin.from('billing_periods').insert({
+    society_id: SOCIETY_ID,
+    house_id: noPaymentHouse.id,
+    period_month: currentPeriodMonth,
+    base_amount: 1700,
+    amount_due: 1700,
+    status: 'Open',
+  });
+  if (noPaymentPeriodError) {
+    console.error(
+      "setup failed: could not create the no-payment throwaway house's period",
+      noPaymentPeriodError.message
+    );
+  }
+
+  const lastPaymentReport = await get(`/society/${SOCIETY_ID}/pendency-report`, adminToken);
+  const lastPaymentHouseEntry = findHouse(lastPaymentReport.body.houses, lastPaymentHouse.id);
+  check(
+    'the lastPayment throwaway house shows only its still-Open current-month period, the older one having closed',
+    !!lastPaymentHouseEntry &&
+      lastPaymentHouseEntry.openPeriods.length === 1 &&
+      lastPaymentHouseEntry.openPeriods[0].period_month === currentPeriodMonth &&
+      Number(lastPaymentHouseEntry.totalOutstanding) === LAST_PAYMENT_AMOUNT &&
+      lastPaymentHouseEntry.overdueMonths === 0,
+    lastPaymentHouseEntry
+  );
+  check(
+    'that same house carries the Cash payment as its lastPayment, dated today',
+    !!lastPaymentHouseEntry &&
+      !!lastPaymentHouseEntry.lastPayment &&
+      Number(lastPaymentHouseEntry.lastPayment.amount) === LAST_PAYMENT_AMOUNT,
+    lastPaymentHouseEntry?.lastPayment
+  );
+  check(
+    "lastPaidBillingPeriod names the OLDER period that payment actually closed, not the still-Open current one",
+    !!lastPaymentHouseEntry && lastPaymentHouseEntry.lastPaidBillingPeriod === oldPeriodMonth,
+    lastPaymentHouseEntry
+  );
+
+  const noPaymentHouseEntry = findHouse(lastPaymentReport.body.houses, noPaymentHouse.id);
+  check(
+    'a house with an Open period but zero payment history reports lastPayment/lastPaidBillingPeriod as null, not omitted or zero',
+    !!noPaymentHouseEntry && noPaymentHouseEntry.lastPayment === null && noPaymentHouseEntry.lastPaidBillingPeriod === null,
+    noPaymentHouseEntry
+  );
+
   // --- A Committee-only member (no is_admin) can view this report too,
   //     same Admin-or-Committee split as the billing-periods-by-month view ---
   const committeeMember = await post('/members', adminToken, {
@@ -237,6 +364,22 @@ async function main() {
   // deleting the throwaway auth user cascades its society_members row.
   if (paidHouse?.id) {
     await supabaseAdmin.from('houses').delete().eq('id', paidHouse.id);
+  }
+  // transaction_allocations.billing_period_id is ON DELETE RESTRICT by
+  // design - the Cash transaction (and its allocation) must be deleted
+  // BEFORE the house/period it points to, or the house delete's cascade
+  // to billing_periods gets blocked and silently leaks it (see this
+  // codebase's "Admin Cash Payments" progress-log entry for the same bug
+  // found and fixed the same way in test-cash-payment.js).
+  if (lastPaymentTxn.body?.id) {
+    await supabaseAdmin.from('audit_events').delete().eq('entity_id', lastPaymentTxn.body.id);
+    await supabaseAdmin.from('transactions').delete().eq('id', lastPaymentTxn.body.id);
+  }
+  if (lastPaymentHouse?.id) {
+    await supabaseAdmin.from('houses').delete().eq('id', lastPaymentHouse.id);
+  }
+  if (noPaymentHouse?.id) {
+    await supabaseAdmin.from('houses').delete().eq('id', noPaymentHouse.id);
   }
   for (const authUserId of createdAuthUserIds) {
     await supabaseAdmin.auth.admin.deleteUser(authUserId);

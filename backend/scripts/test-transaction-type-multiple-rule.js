@@ -124,6 +124,7 @@ async function main() {
     utr_number: `${testUtr}UTILITY`,
     transaction_type: 'UtilityBill',
     payee_name: 'Test Utility Co',
+    description: 'Test utility bill payment',
   });
   check(
     'a non-Maintenance type with a non-multiple amount is exempt from the rule and succeeds (201)',
