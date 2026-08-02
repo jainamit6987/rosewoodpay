@@ -35,8 +35,12 @@ function formatPaymentReference(transaction) {
 
 // Same allocation-naming logic as MyTransactionsScreen - see that file's
 // own comment for why this reads transaction_allocations rather than a
-// plain count.
+// plain count, and for why WaterCharge (never allocated against
+// billing_periods at all) gets its own description-based line instead.
 function describeAllocations(transaction) {
+  if (transaction.transaction_type === 'WaterCharge') {
+    return transaction.description ? `Water charge: ${transaction.description}` : 'Water charge';
+  }
   const allocations = transaction.transaction_allocations || [];
   if (allocations.length === 0) return 'No billing period allocated yet';
   const months = allocations

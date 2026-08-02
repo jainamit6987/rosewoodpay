@@ -21,10 +21,12 @@ function currentPeriodLabel(currentPeriod) {
   return `${formatMonth(currentPeriod.period_month)} \u00b7 ${currentPeriod.status}`;
 }
 
-// The resident landing dashboard - a personal summary "table" plus three
+// The resident landing dashboard - a personal summary "table" plus four
 // spokes: paying dues (DuesScreen's existing period-selection UI, now
-// scoped to just this one house - see App.js), all past transactions, and
-// the full billing history for this house. onBack is only passed when this
+// scoped to just this one house - see App.js), all past transactions, the
+// full billing history for this house, and paying for extra water charges
+// (WaterChargeScreen - a separate, pay-as-you-go flow, not another billing
+// period). onBack is only passed when this
 // screen is itself a spoke off SelectHouseScreen (a resident with more than
 // one house); with exactly one house this IS the resident's true home
 // screen, so it gets Sign out instead of a back link - same "only the true
@@ -37,6 +39,7 @@ export default function ResidentHomeScreen({
   onPayDues,
   onViewTransactions,
   onViewHistory,
+  onViewWaterCharges,
   onBack,
   onLogout,
   refreshing,
@@ -114,6 +117,10 @@ export default function ResidentHomeScreen({
         <TouchableOpacity style={styles.tile} onPress={onViewHistory}>
           <Text style={styles.tileTitle}>Billing Periods</Text>
           <Text style={styles.tileSummary}>All months & status</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.tile} onPress={onViewWaterCharges}>
+          <Text style={styles.tileTitle}>Water Charges</Text>
+          <Text style={styles.tileSummary}>Pay for extra water</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>

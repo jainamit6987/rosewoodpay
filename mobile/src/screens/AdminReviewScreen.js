@@ -42,7 +42,16 @@ function formatPaymentReference(transaction) {
 // count, so an admin reviewing a payment can see at a glance which specific
 // months it would settle before deciding to Verify it. Sorted oldest-first
 // to match the FIFO order routes/transactions.js actually applies in.
+//
+// WaterCharge never has any allocations at all - it is deliberately
+// pay-as-you-go, not allocated against billing_periods (see
+// routes/transactions.js) - so "No allocations recorded" would misread as
+// something having gone wrong. Shown instead as its own description, or a
+// plain fallback if the resident/admin left one blank.
 function describeAllocations(transaction) {
+  if (transaction.transaction_type === 'WaterCharge') {
+    return transaction.description ? `Water charge: ${transaction.description}` : 'Water charge';
+  }
   const allocations = transaction.transaction_allocations || [];
   if (allocations.length === 0) return 'No allocations recorded';
   const months = allocations

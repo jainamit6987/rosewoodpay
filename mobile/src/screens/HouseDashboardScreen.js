@@ -14,6 +14,8 @@ import { useAuth } from '../context/AuthContext';
 
 const SEARCH_DEBOUNCE_MS = 350;
 const RELATIONSHIP_TYPES = ['Owner', 'Tenant', 'Occupant'];
+const MIN_ADVANCE_MONTHS = 1;
+const MAX_ADVANCE_MONTHS = 24; // mirrors backend's own MAX_MONTHS_PER_REQUEST guardrail
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -25,6 +27,19 @@ function formatMonth(periodMonth) {
 
 function formatDate(value) {
   return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// Same local-date (not UTC) formatting as RecordExpenseScreen's own
+// toDateOnly/WaterChargeScreen's own copy of it - a water charge is tied
+// to the specific day it happened, never a month or billing cycle (there
+// is no billing period behind it at all - see routes/transactions.js). No
+// date picker yet here either - defaults to today, the day this Cash
+// payment is actually being recorded on.
+function toDateOnly(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 // Same definition as ResidentHomeScreen's own currentPeriodLabel - this
@@ -80,6 +95,31 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState(null);
   const latestAddQueryRef = useRef('');
+
+  // S.No 15: lets an Admin create billing period(s) ahead of any payment,
+  // so a resident who wants to pay several months of maintenance in
+  // advance has something on their dues screen to pay against - see
+  // POST /houses/:houseId/billing-periods in routes/houses.js. monthsInput
+  // is kept as a string (not a number) so the TextInput can hold an
+  // empty/in-progress value like "" or "0" while typing, without the
+  // clamp logic fighting the user on every keystroke; it is only clamped
+  // to [MIN_ADVANCE_MONTHS, MAX_ADVANCE_MONTHS] at submit time.
+  const [advanceMonthsInput, setAdvanceMonthsInput] = useState('1');
+  const [advanceBusy, setAdvanceBusy] = useState(false);
+  const [advanceError, setAdvanceError] = useState(null);
+  const [advanceResult, setAdvanceResult] = useState(null);
+
+  // Admin's "pay for house water charges in Cash" counterpart to the
+  // resident's own WaterChargeScreen (UPI, reviewed) - see
+  // 20260803000000_add_water_charge_transaction_type.sql. Cash auto-
+  // Verifies immediately (same rule as every other Cash payment in this
+  // codebase), so there is nothing to review afterward; this just records
+  // it directly, pay-as-you-go, with no pre-billed amount to match against.
+  const [waterAmount, setWaterAmount] = useState('');
+  const [waterDescription, setWaterDescription] = useState('');
+  const [waterBusy, setWaterBusy] = useState(false);
+  const [waterError, setWaterError] = useState(null);
+  const [waterResult, setWaterResult] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -197,6 +237,67 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
     }
   };
 
+  const clampAdvanceMonths = (value) => {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return MIN_ADVANCE_MONTHS;
+    return Math.min(MAX_ADVANCE_MONTHS, Math.max(MIN_ADVANCE_MONTHS, parsed));
+  };
+
+  const stepAdvanceMonths = (delta) => {
+    setAdvanceMonthsInput(String(clampAdvanceMonths((parseInt(advanceMonthsInput, 10) || 0) + delta)));
+  };
+
+  const handleCreateAdvancePeriods = async () => {
+    const months = clampAdvanceMonths(advanceMonthsInput);
+    setAdvanceMonthsInput(String(months));
+    setAdvanceError(null);
+    setAdvanceResult(null);
+    setAdvanceBusy(true);
+    try {
+      const created = await apiPost(`/houses/${house.id}/billing-periods`, accessToken, { months });
+      setAdvanceResult(created);
+      await load();
+    } catch (err) {
+      // Surfaces the backend's own message as-is - e.g. "no default
+      // monthly amount configured" or "every requested month already has
+      // a billing period" already say exactly what to do next.
+      setAdvanceError(err.message);
+    } finally {
+      setAdvanceBusy(false);
+    }
+  };
+
+  const handleRecordWaterCash = async () => {
+    const parsedAmount = Number(waterAmount);
+    setWaterError(null);
+    setWaterResult(null);
+    if (!parsedAmount || parsedAmount <= 0) {
+      setWaterError('Enter a valid amount.');
+      return;
+    }
+    setWaterBusy(true);
+    try {
+      const response = await apiPost('/transactions', accessToken, {
+        house_id: house.id,
+        amount: parsedAmount,
+        transaction_type: 'WaterCharge',
+        payment_mode: 'Cash',
+        txn_date: toDateOnly(new Date()),
+        ...(waterDescription.trim() ? { description: waterDescription.trim() } : {}),
+      });
+      setWaterResult(response);
+      setWaterAmount('');
+      setWaterDescription('');
+    } catch (err) {
+      // Surfaces the backend's own message as-is, e.g. "Only an Admin of
+      // this house's society can record a Cash payment." for a Committee
+      // member who tries this (see routes/transactions.js's Cash-mode check).
+      setWaterError(err.message);
+    } finally {
+      setWaterBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -265,6 +366,101 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
       ) : (
         <Text style={styles.paidUp}>All caught up - no open dues.</Text>
       )}
+
+      <Text style={styles.sectionHeader}>Advance Billing</Text>
+      <View style={styles.card}>
+        <Text style={styles.advanceHint}>
+          Create billing period(s) ahead of any payment, so this house can pay maintenance in advance.
+        </Text>
+
+        <View style={styles.stepperRow}>
+          <TouchableOpacity
+            style={styles.stepperButton}
+            onPress={() => stepAdvanceMonths(-1)}
+            disabled={advanceBusy}
+          >
+            <Text style={styles.stepperButtonText}>−</Text>
+          </TouchableOpacity>
+          <TextInput
+            style={styles.stepperInput}
+            value={advanceMonthsInput}
+            onChangeText={setAdvanceMonthsInput}
+            onBlur={() => setAdvanceMonthsInput(String(clampAdvanceMonths(advanceMonthsInput)))}
+            keyboardType="number-pad"
+            editable={!advanceBusy}
+          />
+          <TouchableOpacity
+            style={styles.stepperButton}
+            onPress={() => stepAdvanceMonths(1)}
+            disabled={advanceBusy}
+          >
+            <Text style={styles.stepperButtonText}>+</Text>
+          </TouchableOpacity>
+          <Text style={styles.stepperLabel}>month{clampAdvanceMonths(advanceMonthsInput) === 1 ? '' : 's'} ahead</Text>
+        </View>
+
+        {advanceError ? <Text style={styles.rowError}>{advanceError}</Text> : null}
+
+        {advanceResult ? (
+          <Text style={styles.advanceResultText}>
+            Created {advanceResult.length} billing period{advanceResult.length === 1 ? '' : 's'}:{' '}
+            {advanceResult.map((p) => formatMonth(p.period_month)).join(', ')}.
+          </Text>
+        ) : null}
+
+        <TouchableOpacity
+          style={[styles.addButton, advanceBusy && styles.addButtonDisabled]}
+          onPress={handleCreateAdvancePeriods}
+          disabled={advanceBusy}
+        >
+          <Text style={styles.addButtonText}>{advanceBusy ? 'Creating…' : 'Create Billing Period(s)'}</Text>
+        </TouchableOpacity>
+      </View>
+
+      <Text style={styles.sectionHeader}>Water Charges</Text>
+      <View style={styles.card}>
+        <Text style={styles.advanceHint}>
+          Record a Cash payment for extra water usage - pay-as-you-go, no fixed monthly rate. Recorded as
+          already Verified immediately, no separate review step.
+        </Text>
+
+        <Text style={styles.detailLabel}>Amount</Text>
+        <TextInput
+          style={styles.searchInput}
+          keyboardType="decimal-pad"
+          placeholder="e.g. 300"
+          placeholderTextColor="#999"
+          value={waterAmount}
+          onChangeText={setWaterAmount}
+          editable={!waterBusy}
+        />
+
+        <Text style={styles.detailLabel}>Note (optional)</Text>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="e.g. extra water tanker in July"
+          placeholderTextColor="#999"
+          value={waterDescription}
+          onChangeText={setWaterDescription}
+          editable={!waterBusy}
+        />
+
+        {waterError ? <Text style={styles.rowError}>{waterError}</Text> : null}
+
+        {waterResult ? (
+          <Text style={styles.advanceResultText}>
+            Recorded {formatMoney(waterResult.amount)} - already Verified.
+          </Text>
+        ) : null}
+
+        <TouchableOpacity
+          style={[styles.addButton, waterBusy && styles.addButtonDisabled]}
+          onPress={handleRecordWaterCash}
+          disabled={waterBusy}
+        >
+          <Text style={styles.addButtonText}>{waterBusy ? 'Recording…' : 'Record Cash Payment'}</Text>
+        </TouchableOpacity>
+      </View>
 
       <View style={styles.sectionHeaderRow}>
         <Text style={styles.sectionHeader}>Residents</Text>
@@ -538,6 +734,53 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     fontSize: 15,
+  },
+  advanceHint: {
+    fontSize: 13,
+    color: '#6e6e73',
+    marginBottom: 14,
+  },
+  stepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 14,
+  },
+  stepperButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d0d0d0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stepperButtonText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a73e8',
+  },
+  stepperInput: {
+    width: 56,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    backgroundColor: '#f5f6f8',
+    textAlign: 'center',
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1c1c1e',
+  },
+  stepperLabel: {
+    fontSize: 13,
+    color: '#6e6e73',
+  },
+  advanceResultText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2e7d32',
+    marginBottom: 12,
   },
   sectionHeader: {
     fontSize: 12,

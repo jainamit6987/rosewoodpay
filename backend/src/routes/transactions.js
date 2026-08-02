@@ -11,14 +11,20 @@ const PG_UNIQUE_VIOLATION = '23505';
 const PG_INSUFFICIENT_PRIVILEGE = '42501';
 
 // Kept in sync with the chk_transaction_type CHECK constraint added in
-// 20260725030000_add_transaction_type_and_multiple_rule.sql. MAINTENANCE_TYPE
-// is a resident paying the society, allocated against their house's billing
-// periods below; the other three are the society paying someone else
-// (a vendor, an employee) and take the entirely separate, house-less path
-// near the top of this handler - see
-// 20260726010000_society_expenses_house_optional.sql.
-const TRANSACTION_TYPES = ['Maintenance', 'UtilityBill', 'Salary', 'Other'];
+// 20260725030000_add_transaction_type_and_multiple_rule.sql and extended in
+// 20260803000000_add_water_charge_transaction_type.sql. MAINTENANCE_TYPE and
+// WATER_CHARGE_TYPE are both a resident paying the society (house-linked,
+// Cr); the three EXPENSE_TYPES are the society paying someone else (a
+// vendor, an employee) and take the entirely separate, house-less path near
+// the top of this handler - see
+// 20260726010000_society_expenses_house_optional.sql. WATER_CHARGE_TYPE
+// shares Maintenance's house-linked path (below) but deliberately skips its
+// FIFO billing_periods allocation and base-amount-multiple rule - see
+// 20260803000000's own comment for why this is "pay-as-you-go", not
+// pre-billed like a billing period.
+const TRANSACTION_TYPES = ['Maintenance', 'WaterCharge', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
+const EXPENSE_TYPES = ['UtilityBill', 'Salary', 'Other'];
 
 // Kept in sync with the chk_payment_mode CHECK constraint, extended in
 // 20260802000000_extend_expense_payment_modes_and_description.sql. UPI is
@@ -144,7 +150,7 @@ router.post('/', authenticate, async (req, res) => {
   // confirmed with the user) a Submitted-then-self-reviewed checkpoint
   // here would just be theater - the Admin recording it is already the
   // attestation that it's real.
-  if (resolvedTransactionType !== MAINTENANCE_TYPE) {
+  if (EXPENSE_TYPES.includes(resolvedTransactionType)) {
     if (house_id) {
       return res.status(400).json({
         error: `house_id must not be provided for ${resolvedTransactionType} transactions - they are society-level expenses, not owed by any house.`,
@@ -248,7 +254,7 @@ router.post('/', authenticate, async (req, res) => {
   }
 
   if (!house_id) {
-    return res.status(400).json({ error: 'house_id is required for Maintenance payments.' });
+    return res.status(400).json({ error: `house_id is required for ${resolvedTransactionType} payments.` });
   }
 
   // society_id is derived from the house, never trusted from the request
@@ -336,91 +342,99 @@ router.post('/', authenticate, async (req, res) => {
     }
   }
 
-  const { data: housePeriods, error: periodsError } = await supabase
-    .from('billing_periods')
-    .select('id, period_month, status, amount_due')
-    .eq('house_id', house_id)
-    .order('period_month', { ascending: true });
+  // WaterCharge deliberately never touches billing_periods at all - see
+  // 20260803000000_add_water_charge_transaction_type.sql's own comment on
+  // why this is "pay-as-you-go" rather than pre-billed like Maintenance.
+  // allocations stays empty for it, all the way through to the
+  // transaction_allocations insert below (skipped entirely when empty).
+  let allocations = [];
 
-  if (periodsError) {
-    return res.status(500).json({ error: periodsError.message });
-  }
+  if (resolvedTransactionType === MAINTENANCE_TYPE) {
+    const { data: housePeriods, error: periodsError } = await supabase
+      .from('billing_periods')
+      .select('id, period_month, status, amount_due')
+      .eq('house_id', house_id)
+      .order('period_month', { ascending: true });
 
-  // FIFO allocation across as many sequential periods as this payment
-  // covers: walk the oldest still-Open periods first, consuming each one's
-  // own amount_due from the submitted total (not a flat rate, since a rate
-  // change could mean periods differ), and auto-generate further periods -
-  // using the house's trusted default_monthly_amount, never the unverified
-  // submitted amount - once the existing ones run out. This one mechanism
-  // covers a single month's payment, clearing several months of arrears in
-  // one lump payment, and paying ahead of schedule.
-  const openPeriods = housePeriods.filter((period) => period.status === 'Open');
-  let cursorMonth = housePeriods.length > 0 ? housePeriods[housePeriods.length - 1].period_month : null;
-
-  const allocations = [];
-  let remaining = amount;
-  let index = 0;
-
-  while (remaining > 0) {
-    let period = openPeriods[index];
-
-    if (!period) {
-      if (!house.default_monthly_amount) {
-        break; // out of periods and no rate configured to generate more - handled below
-      }
-
-      const nextMonth = cursorMonth ? addMonths(cursorMonth, 1) : startOfCurrentMonthUtc();
-      const nextMonthDate = toDateOnly(nextMonth);
-
-      const { data: generated, error: generateError } = await supabaseAdmin
-        .from('billing_periods')
-        .insert({
-          society_id: house.society_id,
-          house_id,
-          period_month: nextMonthDate,
-          base_amount: house.default_monthly_amount,
-          amount_due: house.default_monthly_amount,
-          status: 'Open',
-        })
-        .select('id, period_month, status, amount_due')
-        .single();
-
-      if (generateError) {
-        if (generateError.code === PG_UNIQUE_VIOLATION) {
-          // A concurrent request already generated this exact month for
-          // this house - use it instead of failing.
-          const { data: existing, error: existingError } = await supabaseAdmin
-            .from('billing_periods')
-            .select('id, period_month, status, amount_due')
-            .eq('house_id', house_id)
-            .eq('period_month', nextMonthDate)
-            .single();
-          if (existingError) {
-            return res.status(500).json({ error: existingError.message });
-          }
-          period = existing;
-        } else {
-          return res.status(500).json({ error: generateError.message });
-        }
-      } else {
-        period = generated;
-      }
-
-      openPeriods.push(period);
-      cursorMonth = period.period_month;
+    if (periodsError) {
+      return res.status(500).json({ error: periodsError.message });
     }
 
-    const allocate = Math.min(remaining, Number(period.amount_due));
-    allocations.push({ billing_period_id: period.id, amount_allocated: allocate });
-    remaining -= allocate;
-    index += 1;
-  }
+    // FIFO allocation across as many sequential periods as this payment
+    // covers: walk the oldest still-Open periods first, consuming each one's
+    // own amount_due from the submitted total (not a flat rate, since a rate
+    // change could mean periods differ), and auto-generate further periods -
+    // using the house's trusted default_monthly_amount, never the unverified
+    // submitted amount - once the existing ones run out. This one mechanism
+    // covers a single month's payment, clearing several months of arrears in
+    // one lump payment, and paying ahead of schedule.
+    const openPeriods = housePeriods.filter((period) => period.status === 'Open');
+    let cursorMonth = housePeriods.length > 0 ? housePeriods[housePeriods.length - 1].period_month : null;
 
-  if (remaining > 0) {
-    return res.status(409).json({
-      error:
-        'This amount covers more than the periods available, and no default monthly amount is configured on this house to generate further ones. Ask an admin to configure a rate.',
-    });
+    let remaining = amount;
+    let index = 0;
+
+    while (remaining > 0) {
+      let period = openPeriods[index];
+
+      if (!period) {
+        if (!house.default_monthly_amount) {
+          break; // out of periods and no rate configured to generate more - handled below
+        }
+
+        const nextMonth = cursorMonth ? addMonths(cursorMonth, 1) : startOfCurrentMonthUtc();
+        const nextMonthDate = toDateOnly(nextMonth);
+
+        const { data: generated, error: generateError } = await supabaseAdmin
+          .from('billing_periods')
+          .insert({
+            society_id: house.society_id,
+            house_id,
+            period_month: nextMonthDate,
+            base_amount: house.default_monthly_amount,
+            amount_due: house.default_monthly_amount,
+            status: 'Open',
+          })
+          .select('id, period_month, status, amount_due')
+          .single();
+
+        if (generateError) {
+          if (generateError.code === PG_UNIQUE_VIOLATION) {
+            // A concurrent request already generated this exact month for
+            // this house - use it instead of failing.
+            const { data: existing, error: existingError } = await supabaseAdmin
+              .from('billing_periods')
+              .select('id, period_month, status, amount_due')
+              .eq('house_id', house_id)
+              .eq('period_month', nextMonthDate)
+              .single();
+            if (existingError) {
+              return res.status(500).json({ error: existingError.message });
+            }
+            period = existing;
+          } else {
+            return res.status(500).json({ error: generateError.message });
+          }
+        } else {
+          period = generated;
+        }
+
+        openPeriods.push(period);
+        cursorMonth = period.period_month;
+      }
+
+      const allocate = Math.min(remaining, Number(period.amount_due));
+      allocations.push({ billing_period_id: period.id, amount_allocated: allocate });
+      remaining -= allocate;
+      index += 1;
+    }
+
+    if (remaining > 0) {
+      return res.status(409).json({
+        error:
+          'This amount covers more than the periods available, and no default monthly amount is configured on this house to generate further ones. Ask an admin to configure a rate.',
+      });
+    }
   }
 
   // Cash is auto-Verified at insert time, same as the society-expense
@@ -474,22 +488,31 @@ router.post('/', authenticate, async (req, res) => {
   // incomplete allocations. Accepted MVP gap; moving this whole flow into
   // one Postgres RPC function is the correct fix once this shape is
   // validated end-to-end.
-  const { data: insertedAllocations, error: allocationError } = await supabase
-    .from('transaction_allocations')
-    .insert(
-      allocations.map((allocation) => ({
-        transaction_id: transaction.id,
-        billing_period_id: allocation.billing_period_id,
-        amount_allocated: allocation.amount_allocated,
-      }))
-    )
-    .select();
+  //
+  // allocations is always empty for WaterCharge (see above) - skipping the
+  // insert entirely rather than calling .insert([]) sidesteps relying on
+  // PostgREST's own empty-array-insert behavior, which is not guaranteed
+  // to return a clean empty success the same way a non-empty insert does.
+  let insertedAllocations = [];
+  if (allocations.length > 0) {
+    const { data, error: allocationError } = await supabase
+      .from('transaction_allocations')
+      .insert(
+        allocations.map((allocation) => ({
+          transaction_id: transaction.id,
+          billing_period_id: allocation.billing_period_id,
+          amount_allocated: allocation.amount_allocated,
+        }))
+      )
+      .select();
 
-  if (allocationError) {
-    return res.status(500).json({
-      error: `Transaction recorded but allocation failed: ${allocationError.message}`,
-      transaction,
-    });
+    if (allocationError) {
+      return res.status(500).json({
+        error: `Transaction recorded but allocation failed: ${allocationError.message}`,
+        transaction,
+      });
+    }
+    insertedAllocations = data;
   }
 
   // Cash was inserted already-Verified above, so it needs the same
@@ -577,7 +600,7 @@ router.get('/pending', authenticate, async (req, res) => {
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')
@@ -692,7 +715,7 @@ router.get('/report', authenticate, async (req, res) => {
   let query = supabase
     .from('transactions')
     .select(
-      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
+      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
     )
     .in('society_id', societyIds)
     .order('created_at', { ascending: false });
@@ -762,7 +785,7 @@ router.get('/mine', authenticate, async (req, res) => {
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, description, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('house_id', houseIds)
     .order('created_at', { ascending: false });

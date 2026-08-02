@@ -23,6 +23,7 @@ import MemberDetailScreen from './src/screens/MemberDetailScreen';
 import PendencyReportScreen from './src/screens/PendencyReportScreen';
 import TransactionReportScreen from './src/screens/TransactionReportScreen';
 import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
+import WaterChargeScreen from './src/screens/WaterChargeScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -72,6 +73,11 @@ function AuthenticatedApp() {
   // to (see GET /transactions/mine), so there is nothing house-specific to
   // carry through this state slot.
   const [showMyTransactions, setShowMyTransactions] = useState(false);
+  // Resident's own "pay for extra water" spoke off ResidentHomeScreen - a
+  // {house, society} pair (WaterChargeScreen needs both, same shape as
+  // paymentTarget above), not just a boolean, since the screen builds its
+  // own UPI deep link from society.upi_vpa/upi_payee_name.
+  const [waterChargeTarget, setWaterChargeTarget] = useState(null);
   // Same reasoning as showMyTransactions above - plain booleans, not
   // objects, since neither GET /society nor the houses list is ever scoped
   // to one house/target. Both are spokes off AdminHomeScreen now (see
@@ -262,6 +268,16 @@ function AuthenticatedApp() {
     return <MyTransactionsScreen onBack={() => setShowMyTransactions(false)} />;
   }
 
+  if (waterChargeTarget) {
+    return (
+      <WaterChargeScreen
+        house={waterChargeTarget.house}
+        society={waterChargeTarget.society}
+        onBack={() => setWaterChargeTarget(null)}
+      />
+    );
+  }
+
   // Checked before showSociety below - a drill-down set on top of it, same
   // "clearing this one piece of state falls back to whichever screen
   // underneath is still set" shape as memberDetailTarget/houseDashboardTarget.
@@ -381,6 +397,9 @@ function AuthenticatedApp() {
       onPayDues={() => setPayDuesHouseId(effectiveAssignment.houses?.id)}
       onViewTransactions={() => setShowMyTransactions(true)}
       onViewHistory={() => setHistoryTarget(effectiveAssignment.houses)}
+      onViewWaterCharges={() =>
+        setWaterChargeTarget({ house: effectiveAssignment.houses, society: membership.society })
+      }
       onBack={houseAssignments.length > 1 ? () => setResidentAssignmentId(null) : undefined}
       onLogout={houseAssignments.length > 1 ? undefined : logout}
       refreshing={refreshing}

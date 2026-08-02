@@ -305,7 +305,7 @@ router.get('/:houseId/transactions', authenticate, async (req, res) => {
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, description, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .eq('house_id', houseId)
     .order('created_at', { ascending: false });

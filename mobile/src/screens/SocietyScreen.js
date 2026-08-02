@@ -8,7 +8,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { apiGet } from '../api/client';
+import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
 function formatDate(value) {
@@ -44,6 +44,15 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  // Keyed by society.id (this screen renders a list, same reasoning as
+  // HouseDashboardScreen's own residentRowState) - tracks the inline
+  // confirm-then-run flow for POST /society/:id/billing-periods/generate-next-month
+  // (S.No 16), the one write action on an otherwise read-only settings
+  // screen. confirming/result/error/busy mirror MemberDetailScreen's own
+  // Suspend confirmation shape - this action touches every house in the
+  // society at once, so it gets the same "explicit inline confirm first"
+  // treatment Suspend does, not Verify's immediate one.
+  const [generateState, setGenerateState] = useState({});
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +72,31 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
     setRefreshing(true);
     await load();
     setRefreshing(false);
+  };
+
+  const startGenerateConfirm = (societyId) => {
+    setGenerateState((prev) => ({ ...prev, [societyId]: { confirming: true, busy: false, error: null, result: null } }));
+  };
+
+  const cancelGenerateConfirm = (societyId) => {
+    setGenerateState((prev) => {
+      const next = { ...prev };
+      delete next[societyId];
+      return next;
+    });
+  };
+
+  const confirmGenerateNextMonth = async (societyId) => {
+    setGenerateState((prev) => ({ ...prev, [societyId]: { ...prev[societyId], busy: true, error: null } }));
+    try {
+      const result = await apiPost(`/society/${societyId}/billing-periods/generate-next-month`, accessToken);
+      setGenerateState((prev) => ({ ...prev, [societyId]: { confirming: false, busy: false, error: null, result } }));
+    } catch (err) {
+      setGenerateState((prev) => ({
+        ...prev,
+        [societyId]: { ...prev[societyId], busy: false, error: err.message },
+      }));
+    }
   };
 
   if (loading) {
@@ -107,33 +141,34 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
         <Text style={styles.subtitle}>No society found for this account.</Text>
       )}
 
-      {societies.map((society) => (
-        <View key={society.id} style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Text style={styles.societyName}>{society.name}</Text>
-            <View style={[styles.badge, statusBadgeStyle(society.status)]}>
-              <Text style={[styles.badgeText, statusTextStyle(society.status)]}>{society.status}</Text>
+      {societies.map((society) => {
+        const generate = generateState[society.id] || {};
+        return (
+          <View key={society.id} style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text style={styles.societyName}>{society.name}</Text>
+              <View style={[styles.badge, statusBadgeStyle(society.status)]}>
+                <Text style={[styles.badgeText, statusTextStyle(society.status)]}>{society.status}</Text>
+              </View>
             </View>
-          </View>
 
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>UPI VPA</Text>
-            <Text style={styles.detailValue}>{society.upi_vpa}</Text>
-          </View>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>UPI payee name</Text>
-            <Text style={styles.detailValue}>{society.upi_payee_name}</Text>
-          </View>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Timezone</Text>
-            <Text style={styles.detailValue}>{society.timezone}</Text>
-          </View>
-          <View style={[styles.detailRow, styles.detailRowLast]}>
-            <Text style={styles.detailLabel}>Registered on</Text>
-            <Text style={styles.detailValue}>{formatDate(society.created_at)}</Text>
-          </View>
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>UPI VPA</Text>
+              <Text style={styles.detailValue}>{society.upi_vpa}</Text>
+            </View>
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>UPI payee name</Text>
+              <Text style={styles.detailValue}>{society.upi_payee_name}</Text>
+            </View>
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Timezone</Text>
+              <Text style={styles.detailValue}>{society.timezone}</Text>
+            </View>
+            <View style={[styles.detailRow, styles.detailRowLast]}>
+              <Text style={styles.detailLabel}>Registered on</Text>
+              <Text style={styles.detailValue}>{formatDate(society.created_at)}</Text>
+            </View>
 
-          {onViewPendencyReport || onViewTransactionReport ? (
             <View style={styles.reportGrid}>
               {onViewPendencyReport ? (
                 <TouchableOpacity style={styles.reportTile} onPress={() => onViewPendencyReport(society)}>
@@ -147,10 +182,77 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
                   <Text style={styles.reportTileSummary}>Society ledger by month →</Text>
                 </TouchableOpacity>
               ) : null}
+              {/* S.No 16: bulk-create next month's billing period for every
+                  Active house in this society in one call. Styled as a
+                  filled (not gray) tile - the two above are navigation,
+                  this one is a write action - and turns green once it has
+                  already run once for this screen session, to make an
+                  accidental double-run (which is otherwise harmless -
+                  already-existing months are just skipped) visually
+                  unlikely rather than relying on the backend's own
+                  idempotency alone. Not gated on either onView* prop above -
+                  this tile is self-contained (calls apiPost directly), not a
+                  navigation handoff to App.js. */}
+              <TouchableOpacity
+                style={[styles.actionTile, generate.result && styles.actionTileDone]}
+                onPress={() => startGenerateConfirm(society.id)}
+                disabled={generate.confirming || generate.busy}
+              >
+                <Text style={styles.actionTileTitle}>
+                  {generate.result ? 'Generated ✓' : "Generate Next Month's Billing"}
+                </Text>
+                <Text style={styles.actionTileSummary}>
+                  {generate.result ? 'Run again if needed' : 'Every house, one month ahead'}
+                </Text>
+              </TouchableOpacity>
             </View>
-          ) : null}
-        </View>
-      ))}
+
+            {generate.confirming ? (
+              <View style={styles.confirmBox}>
+                <Text style={styles.confirmText}>
+                  This creates next month's billing period for every Active house in {society.name} that doesn't
+                  already have one, using each house's own configured rate. Continue?
+                </Text>
+                <View style={styles.confirmActionRow}>
+                  <TouchableOpacity
+                    style={styles.confirmCancelButton}
+                    onPress={() => cancelGenerateConfirm(society.id)}
+                    disabled={generate.busy}
+                  >
+                    <Text style={styles.confirmCancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.confirmGoButton}
+                    onPress={() => confirmGenerateNextMonth(society.id)}
+                    disabled={generate.busy}
+                  >
+                    <Text style={styles.confirmGoButtonText}>{generate.busy ? 'Generating…' : 'Confirm'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : null}
+
+            {generate.error ? <Text style={styles.generateError}>{generate.error}</Text> : null}
+
+            {generate.result ? (
+              <View style={styles.confirmBox}>
+                <Text style={styles.generateResultText}>
+                  Created for {generate.result.created.length} house
+                  {generate.result.created.length === 1 ? '' : 's'}
+                  {generate.result.skipped.length > 0
+                    ? `, skipped ${generate.result.skipped.length} house${generate.result.skipped.length === 1 ? '' : 's'}:`
+                    : '.'}
+                </Text>
+                {generate.result.skipped.map((skip) => (
+                  <Text key={skip.house_id} style={styles.generateSkippedText}>
+                    • {skip.house_number}: {skip.reason}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
     </ScrollView>
   );
 }
@@ -276,6 +378,84 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#1a73e8',
     fontWeight: '600',
+    marginTop: 4,
+  },
+  actionTile: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    backgroundColor: '#1a73e8',
+    borderRadius: 10,
+    padding: 14,
+    minHeight: 70,
+    justifyContent: 'center',
+  },
+  actionTileDone: {
+    backgroundColor: '#2e7d32',
+  },
+  actionTileTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  actionTileSummary: {
+    fontSize: 12,
+    color: '#e8f0fe',
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  confirmBox: {
+    backgroundColor: '#f5f5f7',
+    borderRadius: 10,
+    padding: 14,
+    marginTop: 12,
+  },
+  confirmText: {
+    fontSize: 13,
+    color: '#1c1c1e',
+    marginBottom: 12,
+  },
+  confirmActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  confirmCancelButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d0d0d0',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  confirmCancelButtonText: {
+    color: '#6e6e73',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  confirmGoButton: {
+    flex: 1,
+    backgroundColor: '#1a73e8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  confirmGoButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  generateError: {
+    color: '#c0392b',
+    fontSize: 13,
+    marginTop: 10,
+  },
+  generateResultText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1c1c1e',
+  },
+  generateSkippedText: {
+    fontSize: 12,
+    color: '#6e6e73',
     marginTop: 4,
   },
   badge: {

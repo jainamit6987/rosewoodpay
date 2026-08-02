@@ -119,8 +119,8 @@ function buildReportHtml({ societyName, monthText, rows, totalCr, totalDr }) {
 // Admin/Committee "view transaction report at society level" - a flat,
 // whole-society ledger for a chosen calendar month, backed by
 // GET /society/:id/transaction-report. Every Verified transaction either
-// direction: Cr (a resident's Maintenance payment, money in) or Dr (a
-// society expense - Salary/UtilityBill/Other, money out). Launched from
+// direction: Cr (a resident's Maintenance or WaterCharge payment, money in)
+// or Dr (a society expense - Salary/UtilityBill/Other, money out). Launched from
 // within a society's own card on SocietyScreen, same shape as
 // PendencyReportScreen (both are whole-society reports, not scoped to one
 // house).
@@ -287,7 +287,7 @@ export default function TransactionReportScreen({ society, onBack }) {
           <View style={styles.summaryCard}>
             <View>
               <Text style={styles.summaryValueCr}>{formatMoney(totalCr)}</Text>
-              <Text style={styles.summaryLabel}>total Cr (maintenance)</Text>
+              <Text style={styles.summaryLabel}>total Cr (maintenance/water)</Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
               <Text style={styles.summaryValueDr}>{formatMoney(totalDr)}</Text>

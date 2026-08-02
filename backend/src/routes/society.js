@@ -472,11 +472,11 @@ function formatPeriodMonthLabel(periodMonth) {
 // still what gets *displayed* as the transaction date below - it is only
 // unsafe as a filter, not as a display value.
 //
-// Cr/Dr is derived from transaction_type: Maintenance is a resident
-// paying the society (money in, Cr); UtilityBill/Salary/Other are the
-// society paying someone else (money out, Dr) - the same split already
-// established by the "two entirely separate paths" comment on POST /
-// in routes/transactions.js.
+// Cr/Dr is derived from transaction_type: Maintenance and WaterCharge are
+// both a resident paying the society (money in, Cr); UtilityBill/Salary/
+// Other are the society paying someone else (money out, Dr) - the same
+// split already established by the "two entirely separate paths" comment
+// on POST / in routes/transactions.js.
 //
 // description is synthesized rather than read from a column for
 // Maintenance rows specifically: those never have transactions.description
@@ -484,7 +484,12 @@ function formatPeriodMonthLabel(periodMonth) {
 // constraint), so this fills in "House <no> - <billing period(s)>" from
 // the same house/allocation data the pendency report already embeds,
 // covering the multiple-months-in-one-payment case as a comma-joined list.
-// Expense rows already carry a real description, used as-is.
+// WaterCharge rows do carry a real (optional) description - since they are
+// never allocated against any billing_period (deliberately pay-as-you-go,
+// see 20260803000000_add_water_charge_transaction_type.sql) there is no
+// period list to synthesize from, so this reads "House <no> - Water Charge"
+// plus that description if one was given. Expense rows already carry a
+// real, required description, used as-is.
 router.get('/:id/transaction-report', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id: societyId } = req.params;
@@ -531,6 +536,8 @@ router.get('/:id/transaction-report', authenticate, async (req, res) => {
 
   const rows = (transactions || []).map((txn) => {
     const isMaintenance = txn.transaction_type === 'Maintenance';
+    const isWaterCharge = txn.transaction_type === 'WaterCharge';
+    const houseLabel = txn.houses?.house_number ? `House ${txn.houses.house_number}` : 'House \u2014';
     let description;
     if (isMaintenance) {
       const coveredMonths = [
@@ -540,11 +547,12 @@ router.get('/:id/transaction-report', authenticate, async (req, res) => {
             .filter(Boolean)
         ),
       ].sort();
-      const houseLabel = txn.houses?.house_number ? `House ${txn.houses.house_number}` : 'House \u2014';
       description =
         coveredMonths.length > 0
           ? `${houseLabel} - ${coveredMonths.map(formatPeriodMonthLabel).join(', ')}`
           : houseLabel;
+    } else if (isWaterCharge) {
+      description = txn.description ? `${houseLabel} - Water Charge (${txn.description})` : `${houseLabel} - Water Charge`;
     } else {
       description = txn.description || '\u2014';
     }
@@ -555,7 +563,7 @@ router.get('/:id/transaction-report', authenticate, async (req, res) => {
       utr_number: txn.utr_number,
       payment_mode: txn.payment_mode,
       transaction_type: txn.transaction_type,
-      direction: isMaintenance ? 'Cr' : 'Dr',
+      direction: isMaintenance || isWaterCharge ? 'Cr' : 'Dr',
       amount: txn.amount,
       description,
     };

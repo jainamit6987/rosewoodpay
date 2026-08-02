@@ -299,7 +299,10 @@ async function main() {
   });
   check(
     'a raw DB insert pairing a non-Maintenance type with a house_id violates the CHECK constraint even with RLS bypassed',
-    !!rawInsertError && /chk_house_id_required_for_maintenance_only/i.test(rawInsertError.message || ''),
+    // Constraint renamed (and widened to also require house_id for
+    // WaterCharge) in 20260803000000_add_water_charge_transaction_type.sql -
+    // still the same rule for every EXPENSE_TYPES value tested here.
+    !!rawInsertError && /chk_house_id_required_for_house_linked_types/i.test(rawInsertError.message || ''),
     rawInsertError
   );
 

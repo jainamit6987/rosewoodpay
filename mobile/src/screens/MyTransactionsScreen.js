@@ -40,7 +40,14 @@ function formatPaymentReference(transaction) {
 // allocation's own period_month until now. Sorted oldest-first to read as
 // a small FIFO timeline, matching the order the backend actually applies
 // payments in (routes/transactions.js).
+//
+// WaterCharge never has any allocations at all - it is pay-as-you-go, not
+// allocated against billing_periods - so "No billing period allocated yet"
+// would misread as still-pending rather than simply not applicable here.
 function describeAllocations(transaction) {
+  if (transaction.transaction_type === 'WaterCharge') {
+    return transaction.description ? `Water charge: ${transaction.description}` : 'Water charge';
+  }
   const allocations = transaction.transaction_allocations || [];
   if (allocations.length === 0) return 'No billing period allocated yet';
   const months = allocations
