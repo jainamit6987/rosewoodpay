@@ -41,6 +41,34 @@ export function AuthProvider({ children }) {
     setSession(null);
   };
 
+  // Re-authenticates with the CURRENT password first, rather than trusting
+  // the existing session alone as proof of identity - this app persists
+  // sessions in plain AsyncStorage (see supabaseClient.js's own note), so
+  // requiring the current password too is a cheap, meaningful guard against
+  // someone with a few seconds of access to an unlocked/unattended device
+  // silently locking the real owner out. Returns { success, error } rather
+  // than throwing/setting shared authError - a password-change failure has
+  // nothing to do with the LoginScreen error slot, and the caller (screen)
+  // is better placed to decide how to show it.
+  const changePassword = async (currentPassword, newPassword) => {
+    const email = session?.user?.email;
+    if (!email) {
+      return { success: false, error: 'No signed-in user found.' };
+    }
+
+    const { error: reauthError } = await supabase.auth.signInWithPassword({ email, password: currentPassword });
+    if (reauthError) {
+      return { success: false, error: 'Current password is incorrect.' };
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+    if (updateError) {
+      return { success: false, error: updateError.message };
+    }
+
+    return { success: true };
+  };
+
   const value = useMemo(
     () => ({
       session,
@@ -50,6 +78,7 @@ export function AuthProvider({ children }) {
       authError,
       login,
       logout,
+      changePassword,
     }),
     [session, authError]
   );

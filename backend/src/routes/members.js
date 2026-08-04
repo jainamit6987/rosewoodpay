@@ -628,6 +628,68 @@ router.post('/:id/suspend', authenticate, async (req, res) => {
   res.json(updated);
 });
 
+// POST /members/:id/reset-password - Admin-only. The "someone forgot their
+// password and can't log in" recovery path - there is no email/SMTP
+// provider configured in this project (see generateTemporaryPassword's own
+// comment above), so a true self-service emailed reset link is not
+// possible yet; this is the interim path an Admin uses instead, same
+// "temp password handed over directly, shown once, never stored/logged"
+// shape as POST /members' own account-creation flow. Deliberately allowed
+// regardless of the target's status (including Suspended) - an Admin may
+// reasonably want to line up a fresh password before reactivating someone,
+// and a reset alone cannot itself restore a banned login; that still only
+// happens via /reactivate. No self-reset block either, unlike /suspend -
+// this can never lock the calling Admin themselves out (they keep their
+// existing session either way), so there is nothing to protect against;
+// see ChangePasswordScreen.js/AuthContext.changePassword for the separate
+// self-service flow an Admin would actually use to change their OWN
+// password on purpose.
+router.post('/:id/reset-password', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id } = req.params;
+
+  let member, isAdmin;
+  try {
+    ({ member, isAdmin } = await loadMemberAndCheckAdmin(supabase, req.user.id, id));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  if (!member) {
+    return res.status(404).json({ error: 'Member not found or not accessible.' });
+  }
+  if (!isAdmin) {
+    return res.status(403).json({ error: "Only an Admin of this member's society can reset their password." });
+  }
+
+  const newPassword = generateTemporaryPassword();
+  const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(member.auth_user_id, {
+    password: newPassword,
+  });
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  const { error: auditError } = await supabase.from('audit_events').insert({
+    society_id: member.society_id,
+    actor_user_id: req.user.id,
+    entity_type: 'society_member',
+    entity_id: id,
+    action: 'PasswordReset',
+    metadata: {},
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Password was reset but the audit log entry failed: ${auditError.message}`,
+      id: member.id,
+      temporaryPassword: newPassword,
+    });
+  }
+
+  res.json({ id: member.id, temporaryPassword: newPassword });
+});
+
 // POST /members/:id/reactivate - Admin-only. Sets status='Active' and lifts
 // the auth ban /suspend above applied, restoring everything. No self-check
 // needed here symmetrically to /suspend: a Suspended Admin has already

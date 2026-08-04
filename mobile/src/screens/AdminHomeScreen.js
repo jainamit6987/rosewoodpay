@@ -17,7 +17,16 @@ import { useAuth } from '../context/AuthContext';
 // screen for this mode has Sign out" convention DuesScreen already
 // established on the resident side (BillingHistoryScreen/MyTransactionsScreen
 // don't have one either).
-export default function AdminHomeScreen({ onReviewPayments, onRecordExpense, onViewHouses, onViewMembers, onViewSociety, onSwitchToResident, onLogout }) {
+export default function AdminHomeScreen({
+  onReviewPayments,
+  onRecordExpense,
+  onViewHouses,
+  onViewMembers,
+  onViewSociety,
+  onChangePassword,
+  onSwitchToResident,
+  onLogout,
+}) {
   const { accessToken } = useAuth();
   const [societyName, setSocietyName] = useState(null);
   const [houseCount, setHouseCount] = useState(null);
@@ -128,6 +137,9 @@ export default function AdminHomeScreen({ onReviewPayments, onRecordExpense, onV
       <View style={styles.grid}>
         <TouchableOpacity style={styles.tile} onPress={onViewSociety}>
           <Text style={styles.tileTitle}>Society Settings</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
+          <Text style={styles.tileTitle}>Change Password</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>

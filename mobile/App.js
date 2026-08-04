@@ -24,6 +24,7 @@ import PendencyReportScreen from './src/screens/PendencyReportScreen';
 import TransactionReportScreen from './src/screens/TransactionReportScreen';
 import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
 import WaterChargeScreen from './src/screens/WaterChargeScreen';
+import ChangePasswordScreen from './src/screens/ChangePasswordScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -112,6 +113,12 @@ function AuthenticatedApp() {
   // from membership below, not stored here), same reasoning as
   // showCreateMember above.
   const [showRecordExpense, setShowRecordExpense] = useState(false);
+  // Account-level, not mode-specific - reachable from both AdminHomeScreen
+  // and ResidentHomeScreen's Settings/More sections, same boolean-flag shape
+  // as showRecordExpense/showCreateMember above (nothing existing to carry
+  // through, just the current session ChangePasswordScreen already gets via
+  // useAuth() itself).
+  const [showChangePassword, setShowChangePassword] = useState(false);
   // null = no explicit choice made yet. Only matters when both resident and
   // admin/committee access are available - see hasResidentAccess/
   // hasAdminAccess below; when only one applies there is nothing to choose
@@ -337,6 +344,15 @@ function AuthenticatedApp() {
     );
   }
 
+  if (showChangePassword) {
+    return (
+      <ChangePasswordScreen
+        onDone={() => setShowChangePassword(false)}
+        onCancel={() => setShowChangePassword(false)}
+      />
+    );
+  }
+
   if (showReviewQueue) {
     return <AdminReviewScreen onBack={() => setShowReviewQueue(false)} />;
   }
@@ -355,6 +371,7 @@ function AuthenticatedApp() {
         onViewHouses={() => setShowHouses(true)}
         onViewMembers={() => setShowMembers(true)}
         onViewSociety={() => setShowSociety(true)}
+        onChangePassword={() => setShowChangePassword(true)}
         onSwitchToResident={bothAvailable ? () => setMode('resident') : undefined}
         onLogout={logout}
       />
@@ -400,6 +417,7 @@ function AuthenticatedApp() {
       onViewWaterCharges={() =>
         setWaterChargeTarget({ house: effectiveAssignment.houses, society: membership.society })
       }
+      onChangePassword={() => setShowChangePassword(true)}
       onBack={houseAssignments.length > 1 ? () => setResidentAssignmentId(null) : undefined}
       onLogout={houseAssignments.length > 1 ? undefined : logout}
       refreshing={refreshing}

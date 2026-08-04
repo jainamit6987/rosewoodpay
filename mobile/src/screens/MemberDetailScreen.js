@@ -57,6 +57,11 @@ export default function MemberDetailScreen({ member, onBack }) {
   const [statusActionBusy, setStatusActionBusy] = useState(false);
   const [statusActionError, setStatusActionError] = useState(null);
 
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState(null);
+  const [resetTempPassword, setResetTempPassword] = useState(null);
+
   const load = useCallback(async () => {
     try {
       setError(null);
@@ -141,6 +146,26 @@ export default function MemberDetailScreen({ member, onBack }) {
       setStatusActionError(err.message);
     } finally {
       setStatusActionBusy(false);
+    }
+  };
+
+  // Admin-facing "they forgot their password" recovery path (POST
+  // /members/:id/reset-password) - there is no email/SMTP provider
+  // configured in this project, so this is the interim substitute: a
+  // fresh temp password, shown here once and never stored/logged
+  // anywhere, for the Admin to hand over directly - same shape as
+  // CreateMemberScreen's own account-creation temp password.
+  const confirmReset = async () => {
+    setResetError(null);
+    setResetBusy(true);
+    try {
+      const result = await apiPost(`/members/${member.id}/reset-password`, accessToken);
+      setResetTempPassword(result.temporaryPassword);
+      setConfirmingReset(false);
+    } catch (err) {
+      setResetError(err.message);
+    } finally {
+      setResetBusy(false);
     }
   };
 
@@ -283,6 +308,53 @@ export default function MemberDetailScreen({ member, onBack }) {
 
       <Text style={styles.sectionHeader}>Account</Text>
       <View style={styles.card}>
+        {resetTempPassword ? (
+          <View style={styles.tempPasswordBox}>
+            <Text style={styles.tempPasswordLabel}>New temporary password (shown only once)</Text>
+            <Text style={styles.tempPasswordValue}>{resetTempPassword}</Text>
+            <Text style={styles.tempPasswordHint}>
+              Share this with {detail.name || 'the member'} directly - it will not be shown again. Their previous
+              password no longer works.
+            </Text>
+            <TouchableOpacity style={styles.saveButton} onPress={() => setResetTempPassword(null)}>
+              <Text style={styles.saveButtonText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <>
+            {resetError ? <Text style={styles.error}>{resetError}</Text> : null}
+            {confirmingReset ? (
+              <View>
+                <Text style={styles.confirmText}>
+                  This generates a new temporary password and immediately invalidates {detail.name || 'their'}{' '}
+                  current one. Continue?
+                </Text>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={styles.cancelButton}
+                    onPress={() => setConfirmingReset(false)}
+                    disabled={resetBusy}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.saveButton} onPress={confirmReset} disabled={resetBusy}>
+                    <Text style={styles.saveButtonText}>{resetBusy ? 'Resetting…' : 'Confirm reset'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.resetOutlineButton}
+                onPress={() => setConfirmingReset(true)}
+                disabled={resetBusy}
+              >
+                <Text style={styles.resetOutlineButtonText}>Reset Password</Text>
+              </TouchableOpacity>
+            )}
+            <View style={styles.divider} />
+          </>
+        )}
+
         {statusActionError ? <Text style={styles.error}>{statusActionError}</Text> : null}
 
         {detail.status === 'Suspended' ? (
@@ -515,6 +587,48 @@ const styles = StyleSheet.create({
   suspendButtonText: {
     color: '#fff',
     fontWeight: '600',
+  },
+  resetOutlineButton: {
+    borderWidth: 1,
+    borderColor: '#1a73e8',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  resetOutlineButtonText: {
+    color: '#1a73e8',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#f0f0f0',
+    marginVertical: 14,
+  },
+  tempPasswordBox: {
+    backgroundColor: '#f5f6f8',
+    borderRadius: 8,
+    padding: 16,
+    alignItems: 'center',
+  },
+  tempPasswordLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 6,
+  },
+  tempPasswordValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1a73e8',
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  tempPasswordHint: {
+    fontSize: 12,
+    color: '#777',
+    textAlign: 'center',
+    marginBottom: 12,
   },
   reactivateButton: {
     backgroundColor: '#2e7d32',

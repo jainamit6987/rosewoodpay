@@ -40,6 +40,7 @@ export default function ResidentHomeScreen({
   onViewTransactions,
   onViewHistory,
   onViewWaterCharges,
+  onChangePassword,
   onBack,
   onLogout,
   refreshing,
@@ -121,6 +122,9 @@ export default function ResidentHomeScreen({
         <TouchableOpacity style={styles.tile} onPress={onViewWaterCharges}>
           <Text style={styles.tileTitle}>Water Charges</Text>
           <Text style={styles.tileSummary}>Pay for extra water</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
+          <Text style={styles.tileTitle}>Change Password</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
