@@ -138,9 +138,11 @@ export default function AdminHomeScreen({
         <TouchableOpacity style={styles.tile} onPress={onViewSociety}>
           <Text style={styles.tileTitle}>Society Settings</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
-          <Text style={styles.tileTitle}>Change Password</Text>
-        </TouchableOpacity>
+        {onChangePassword ? (
+          <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
+            <Text style={styles.tileTitle}>Change Password</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
     </ScrollView>
   );

@@ -588,7 +588,7 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
           <Text style={styles.tileSummary}>Payments for this house</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.tile} onPress={onViewHistory}>
-          <Text style={styles.tileTitle}>Billing Periods</Text>
+          <Text style={styles.tileTitle}>Receipts</Text>
           <Text style={styles.tileSummary}>All months & status</Text>
         </TouchableOpacity>
       </View>

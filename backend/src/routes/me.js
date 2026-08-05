@@ -46,7 +46,7 @@ router.get('/', authenticate, async (req, res) => {
     // same as always. This block now always runs.
     const { data: assignments, error: assignmentError } = await supabase
       .from('resident_house_assignments')
-      .select('id, relationship_type, status, houses(id, house_number, type, status, owner_name)')
+      .select('id, relationship_type, status, houses(id, house_number, type, status, owner_name, available_to_rent)')
       .eq('society_member_id', membership.id)
       .eq('status', 'Active');
 

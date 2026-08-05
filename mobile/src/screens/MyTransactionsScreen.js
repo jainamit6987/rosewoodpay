@@ -16,7 +16,7 @@ function formatMoney(amount) {
 }
 
 function formatDate(value) {
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 function formatMonth(periodMonth) {
@@ -36,10 +36,9 @@ function formatPaymentReference(transaction) {
 // count - the DB has always fully supported this (transaction_allocations
 // is a real many-to-many join table, one row per transaction+billing_period
 // pair, exactly to let one payment cover several months and still know
-// which ones), GET /transactions/mine just wasn't asking for each
-// allocation's own period_month until now. Sorted oldest-first to read as
-// a small FIFO timeline, matching the order the backend actually applies
-// payments in (routes/transactions.js).
+// which ones). Sorted oldest-first to read as a small FIFO timeline,
+// matching the order the backend actually applies payments in
+// (routes/transactions.js).
 //
 // WaterCharge never has any allocations at all - it is pay-as-you-go, not
 // allocated against billing_periods - so "No billing period allocated yet"
@@ -74,30 +73,43 @@ function statusTextStyle(status) {
   return styles.badgeTextPending;
 }
 
-// The resident-facing "View Transactions (all)" screen (workflow S.No 4) -
-// every payment the caller has ever submitted, across every house they are
-// Active-assigned to, backed by the aggregated GET /transactions/mine
-// (co-assignee visibility included, so an owner who rents out a house sees
-// their tenant's payments here too - see that route's own comment). Unlike
-// BillingHistoryScreen (one house, every billing period), this is
-// transaction-shaped and spans every house at once, matching how the
-// backend endpoint itself aggregates.
-export default function MyTransactionsScreen({ onBack }) {
+// The resident-facing "My Transactions" tile off ResidentHomeScreen -
+// backed by GET /houses/:houseId/transactions (the same endpoint
+// HouseTransactionsScreen's Admin view already uses), scoped to whichever
+// house the resident is currently viewing, not GET /transactions/mine's
+// old across-every-house aggregation. An owner who holds more than one
+// house used to see every house's payments mixed into one list here, which
+// read as confusing since the rest of this dashboard (Pay Maintenance, My
+// Receipts, etc.) is already scoped to just the one house currently being
+// viewed - the user asked for this screen to match that same scope. That
+// aggregated GET /transactions/mine endpoint itself is untouched (still
+// covers the co-assignee-visibility case - an owner sees their own tenant's
+// payments on this same house), just no longer what this particular screen
+// calls.
+//
+// Rendered as a table (Date/Type/Amount/Status columns, zebra-striped rows)
+// rather than one tall card per transaction - reading down a column (e.g.
+// every Amount) is far easier once a resident has a long payment history,
+// and more rows fit on screen at once. The UTR/Cash reference and which
+// month(s) a payment covers don't fit in a single compact row, so tapping
+// a row expands it in place to reveal them instead of dropping that detail.
+export default function MyTransactionsScreen({ house, onBack }) {
   const { accessToken } = useAuth();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
 
   const load = useCallback(async () => {
     try {
       setError(null);
-      const data = await apiGet('/transactions/mine', accessToken);
+      const data = await apiGet(`/houses/${house.id}/transactions`, accessToken);
       setTransactions(data);
     } catch (err) {
       setError(err.message);
     }
-  }, [accessToken]);
+  }, [accessToken, house.id]);
 
   useEffect(() => {
     load().finally(() => setLoading(false));
@@ -117,9 +129,9 @@ export default function MyTransactionsScreen({ onBack }) {
     >
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>My transactions</Text>
+          <Text style={styles.title}>My Transactions</Text>
           <Text style={styles.subtitle}>
-            {transactions.length} payment{transactions.length === 1 ? '' : 's'} across all your houses
+            {transactions.length} payment{transactions.length === 1 ? '' : 's'} for {house.house_number}
           </Text>
         </View>
         <TouchableOpacity onPress={onBack}>
@@ -141,23 +153,50 @@ export default function MyTransactionsScreen({ onBack }) {
       ) : transactions.length === 0 ? (
         <Text style={styles.empty}>No payments submitted yet.</Text>
       ) : (
-        transactions.map((transaction) => (
-          <View key={transaction.id} style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.houseNumber}>{transaction.houses?.house_number}</Text>
-              <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
-                <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
-                  {transaction.processing_status}
-                </Text>
-              </View>
-            </View>
-            <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
-            <Text style={styles.meta}>
-              {transaction.transaction_type} • {formatPaymentReference(transaction)} • {formatDate(transaction.created_at)}
-            </Text>
-            <Text style={styles.meta}>{describeAllocations(transaction)}</Text>
+        <View style={styles.table}>
+          <View style={styles.tableHeaderRow}>
+            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
+            <Text style={[styles.headerCell, styles.colStatus]}>Status</Text>
           </View>
-        ))
+          {transactions.map((transaction, index) => {
+            const isExpanded = expandedId === transaction.id;
+            return (
+              <TouchableOpacity
+                key={transaction.id}
+                activeOpacity={0.7}
+                onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
+              >
+                <View style={styles.tableRowLine}>
+                  <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                    {formatDate(transaction.created_at)}
+                  </Text>
+                  <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                    {transaction.transaction_type}
+                  </Text>
+                  <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
+                    {formatMoney(transaction.amount)}
+                  </Text>
+                  <View style={[styles.colStatus, styles.cellStatusWrap]}>
+                    <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
+                      <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
+                        {transaction.processing_status}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+                {isExpanded ? (
+                  <View style={styles.detailBox}>
+                    <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                    <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                  </View>
+                ) : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       )}
     </ScrollView>
   );
@@ -205,31 +244,74 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 20,
   },
-  card: {
+  table: {
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 16,
-    marginBottom: 14,
     borderWidth: 1,
     borderColor: '#e6e6e6',
+    overflow: 'hidden',
   },
-  cardHeader: {
+  tableHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eeeeee',
+  },
+  headerCell: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#8a8a8e',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  tableRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  tableRowZebra: {
+    backgroundColor: '#fafafa',
+  },
+  tableRowLine: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 6,
   },
-  houseNumber: {
-    fontSize: 16,
+  cellText: {
+    fontSize: 12,
+    color: '#1c1c1e',
+  },
+  cellMuted: {
+    color: '#6e6e73',
+  },
+  cellAmount: {
     fontWeight: '700',
+    textAlign: 'right',
   },
-  amount: {
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 6,
+  cellStatusWrap: {
+    alignItems: 'flex-end',
   },
-  meta: {
-    fontSize: 13,
+  colDate: {
+    flex: 1.1,
+  },
+  colType: {
+    flex: 1.3,
+  },
+  colAmount: {
+    flex: 1.2,
+    textAlign: 'right',
+  },
+  colStatus: {
+    flex: 1.1,
+  },
+  detailBox: {
+    backgroundColor: '#f0f4fb',
+    borderRadius: 6,
+    padding: 10,
+    marginTop: 10,
+  },
+  detailText: {
+    fontSize: 12,
     color: '#6e6e73',
     marginTop: 2,
   },

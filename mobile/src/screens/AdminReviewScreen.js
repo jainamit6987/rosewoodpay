@@ -17,7 +17,7 @@ function formatMoney(amount) {
 }
 
 function formatDate(value) {
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 function formatMonth(periodMonth) {
@@ -62,12 +62,22 @@ function describeAllocations(transaction) {
   return `Covers: ${months.join(', ')}`;
 }
 
+// Same table treatment as MyTransactionsScreen/HouseTransactionsScreen -
+// House/Date/Type/Amount as compact table columns, zebra-striped rows,
+// tap-a-row-to-expand for the UTR/Cash reference and covered month(s)
+// (there is no separate Status column here, unlike those two screens -
+// every row in this queue is, by definition, still Submitted, so it would
+// be the same badge repeated on every single row). The Verify/Reject
+// actions stay directly on each row, always visible below it, rather than
+// hidden behind the tap - unlike a pure history list, doing something
+// about each row is this screen's entire purpose.
 export default function AdminReviewScreen({ onBack }) {
   const { accessToken } = useAuth();
   const [pending, setPending] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
   // The transaction currently mid-reject (its inline reason box is open),
   // and the reason text typed into it. Only one row can be in this state
   // at a time, mirroring how DuesScreen keeps only one thing "active".
@@ -176,66 +186,94 @@ export default function AdminReviewScreen({ onBack }) {
         <Text style={styles.subtitle}>No pending payments right now - everything is reviewed.</Text>
       )}
 
-      {pending.map((transaction) => {
-        const state = rowState[transaction.id] || {};
-        const isRejecting = rejectingId === transaction.id;
-
-        return (
-          <View key={transaction.id} style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.houseNumber}>{transaction.houses?.house_number}</Text>
-              <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
-            </View>
-            <Text style={styles.meta}>
-              {transaction.transaction_type} • {formatPaymentReference(transaction)} • {formatDate(transaction.created_at)}
-            </Text>
-            <Text style={styles.meta}>{describeAllocations(transaction)}</Text>
-
-            {state.error && <Text style={styles.rowError}>{state.error}</Text>}
-
-            {isRejecting ? (
-              <View style={styles.rejectBox}>
-                <TextInput
-                  style={styles.reasonInput}
-                  placeholder="Reason for rejecting (required)"
-                  value={rejectReason}
-                  onChangeText={setRejectReason}
-                  multiline
-                />
-                <View style={styles.actionRow}>
-                  <TouchableOpacity style={styles.cancelButton} onPress={cancelReject} disabled={state.busy}>
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.rejectButton}
-                    onPress={() => confirmReject(transaction)}
-                    disabled={state.busy}
-                  >
-                    <Text style={styles.rejectButtonText}>{state.busy ? 'Rejecting…' : 'Confirm reject'}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : (
-              <View style={styles.actionRow}>
-                <TouchableOpacity
-                  style={styles.rejectOutlineButton}
-                  onPress={() => startReject(transaction)}
-                  disabled={state.busy}
-                >
-                  <Text style={styles.rejectOutlineButtonText}>Reject</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.verifyButton}
-                  onPress={() => handleVerify(transaction)}
-                  disabled={state.busy}
-                >
-                  <Text style={styles.verifyButtonText}>{state.busy ? 'Verifying…' : 'Verify'}</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+      {pending.length > 0 ? (
+        <View style={styles.table}>
+          <View style={styles.tableHeaderRow}>
+            <Text style={[styles.headerCell, styles.colHouse]}>House</Text>
+            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
           </View>
-        );
-      })}
+          {pending.map((transaction, index) => {
+            const state = rowState[transaction.id] || {};
+            const isRejecting = rejectingId === transaction.id;
+            const isExpanded = expandedId === transaction.id;
+
+            return (
+              <View key={transaction.id} style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                >
+                  <View style={styles.tableRowLine}>
+                    <Text style={[styles.cellText, styles.colHouse]} numberOfLines={1}>
+                      {transaction.houses?.house_number}
+                    </Text>
+                    <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                      {formatDate(transaction.created_at)}
+                    </Text>
+                    <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                      {transaction.transaction_type}
+                    </Text>
+                    <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
+                      {formatMoney(transaction.amount)}
+                    </Text>
+                  </View>
+                  {isExpanded ? (
+                    <View style={styles.detailBox}>
+                      <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                      <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+
+                {state.error && <Text style={styles.rowError}>{state.error}</Text>}
+
+                {isRejecting ? (
+                  <View style={styles.rejectBox}>
+                    <TextInput
+                      style={styles.reasonInput}
+                      placeholder="Reason for rejecting (required)"
+                      value={rejectReason}
+                      onChangeText={setRejectReason}
+                      multiline
+                    />
+                    <View style={styles.actionRow}>
+                      <TouchableOpacity style={styles.cancelButton} onPress={cancelReject} disabled={state.busy}>
+                        <Text style={styles.cancelButtonText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.rejectButton}
+                        onPress={() => confirmReject(transaction)}
+                        disabled={state.busy}
+                      >
+                        <Text style={styles.rejectButtonText}>{state.busy ? 'Rejecting…' : 'Confirm reject'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <View style={styles.actionRow}>
+                    <TouchableOpacity
+                      style={styles.rejectOutlineButton}
+                      onPress={() => startReject(transaction)}
+                      disabled={state.busy}
+                    >
+                      <Text style={styles.rejectOutlineButtonText}>Reject</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.verifyButton}
+                      onPress={() => handleVerify(transaction)}
+                      disabled={state.busy}
+                    >
+                      <Text style={styles.verifyButtonText}>{state.busy ? 'Verifying…' : 'Verify'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
     </ScrollView>
   );
 }
@@ -283,34 +321,72 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 12,
   },
-  card: {
+  table: {
     backgroundColor: '#fff',
     borderRadius: 10,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: '#e6e6e6',
+    overflow: 'hidden',
   },
-  cardHeader: {
+  tableHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eeeeee',
+  },
+  headerCell: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#8a8a8e',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  tableRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  tableRowZebra: {
+    backgroundColor: '#fafafa',
+  },
+  tableRowLine: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 4,
   },
-  houseNumber: {
-    fontSize: 16,
-    fontWeight: '700',
+  cellText: {
+    fontSize: 12,
     color: '#1c1c1e',
   },
-  amount: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1c1c1e',
+  cellMuted: {
+    color: '#6e6e73',
   },
-  meta: {
-    fontSize: 13,
+  cellAmount: {
+    fontWeight: '700',
+    textAlign: 'right',
+  },
+  colHouse: {
+    flex: 1,
+    fontWeight: '700',
+  },
+  colDate: {
+    flex: 1.1,
+  },
+  colType: {
+    flex: 1.3,
+  },
+  colAmount: {
+    flex: 1.2,
+    textAlign: 'right',
+  },
+  detailBox: {
+    backgroundColor: '#f0f4fb',
+    borderRadius: 6,
+    padding: 10,
+    marginTop: 10,
+  },
+  detailText: {
+    fontSize: 12,
     color: '#6e6e73',
     marginTop: 2,
   },

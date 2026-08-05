@@ -16,6 +16,8 @@ import SocietyScreen from './src/screens/SocietyScreen';
 import ResidentHomeScreen from './src/screens/ResidentHomeScreen';
 import SelectHouseScreen from './src/screens/SelectHouseScreen';
 import HouseDashboardScreen from './src/screens/HouseDashboardScreen';
+import HouseProfileScreen from './src/screens/HouseProfileScreen';
+import SocietyListingsScreen from './src/screens/SocietyListingsScreen';
 import HouseTransactionsScreen from './src/screens/HouseTransactionsScreen';
 import MembersScreen from './src/screens/MembersScreen';
 import CreateMemberScreen from './src/screens/CreateMemberScreen';
@@ -68,20 +70,23 @@ function AuthenticatedApp() {
   // dashboard screen itself re-fetches its own live data on load/refresh.
   const [houseDashboardTarget, setHouseDashboardTarget] = useState(null);
   const [houseTransactionsTarget, setHouseTransactionsTarget] = useState(null);
-  // Boolean, not an object like historyTarget/paymentTarget above - unlike
-  // billing history or a payment, "my transactions" is never scoped to one
-  // house, it already aggregates across every house the caller is assigned
-  // to (see GET /transactions/mine), so there is nothing house-specific to
-  // carry through this state slot.
-  const [showMyTransactions, setShowMyTransactions] = useState(false);
+  // A house object, same shape as historyTarget - "My Transactions" used to
+  // be a plain boolean here, back when it aggregated across every house the
+  // caller is assigned to (GET /transactions/mine). It's now scoped to
+  // whichever one house is currently being viewed (GET
+  // /houses/:houseId/transactions instead), matching every other tile on
+  // ResidentHomeScreen - an owner with more than one house was otherwise
+  // seeing every house's payments mixed into one list here, which read as
+  // confusing.
+  const [myTransactionsTarget, setMyTransactionsTarget] = useState(null);
   // Resident's own "pay for extra water" spoke off ResidentHomeScreen - a
   // {house, society} pair (WaterChargeScreen needs both, same shape as
   // paymentTarget above), not just a boolean, since the screen builds its
   // own UPI deep link from society.upi_vpa/upi_payee_name.
   const [waterChargeTarget, setWaterChargeTarget] = useState(null);
-  // Same reasoning as showMyTransactions above - plain booleans, not
-  // objects, since neither GET /society nor the houses list is ever scoped
-  // to one house/target. Both are spokes off AdminHomeScreen now (see
+  // Plain booleans, not objects, since neither GET /society nor the houses
+  // list is ever scoped to one house/target. Both are spokes off
+  // AdminHomeScreen now (see
   // effectiveMode below) - reachable only from there, once effectiveMode is
   // already 'admin', so there is no separate access check needed here.
   const [showSociety, setShowSociety] = useState(false);
@@ -119,6 +124,16 @@ function AuthenticatedApp() {
   // through, just the current session ChangePasswordScreen already gets via
   // useAuth() itself).
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // ResidentHomeScreen's own spoke, off tapping its circular house-number
+  // avatar - just a boolean, same shape as showChangePassword above: the
+  // house it opens is always whichever one effectiveAssignment below is
+  // currently pointed at, nothing else needs to be carried through.
+  const [showHouseProfile, setShowHouseProfile] = useState(false);
+  // ResidentHomeScreen's "More" -> Society Listings spoke - same plain
+  // boolean shape as showHouseProfile above: the society it browses is
+  // always the current membership's own society_id, nothing else needs to
+  // be carried through.
+  const [showSocietyListings, setShowSocietyListings] = useState(false);
   // null = no explicit choice made yet. Only matters when both resident and
   // admin/committee access are available - see hasResidentAccess/
   // hasAdminAccess below; when only one applies there is nothing to choose
@@ -271,8 +286,8 @@ function AuthenticatedApp() {
     );
   }
 
-  if (showMyTransactions) {
-    return <MyTransactionsScreen onBack={() => setShowMyTransactions(false)} />;
+  if (myTransactionsTarget) {
+    return <MyTransactionsScreen house={myTransactionsTarget} onBack={() => setMyTransactionsTarget(null)} />;
   }
 
   if (waterChargeTarget) {
@@ -371,18 +386,29 @@ function AuthenticatedApp() {
         onViewHouses={() => setShowHouses(true)}
         onViewMembers={() => setShowMembers(true)}
         onViewSociety={() => setShowSociety(true)}
-        onChangePassword={() => setShowChangePassword(true)}
+        // Only offered here when there is no alternative path to it - once
+        // this member also has a house of their own (hasResidentAccess),
+        // Change Password lives on HouseProfileScreen instead (reachable
+        // via the new "Switch to Resident view"/"Switch to Admin view"
+        // round trip below), and showing the same action in two places
+        // would just be redundant. A pure Admin/Committee member with no
+        // house at all has no HouseProfileScreen to reach, so this stays
+        // their only self-service path - never fully removed.
+        onChangePassword={hasResidentAccess ? undefined : () => setShowChangePassword(true)}
         onSwitchToResident={bothAvailable ? () => setMode('resident') : undefined}
         onLogout={logout}
       />
     );
   }
 
-  // No admin entry point here on purpose - once "Resident" is chosen (or
-  // is the only thing available), this screen (or SelectHouseScreen below
-  // it, for a multi-house resident) is the entire experience. Getting to
-  // Admin/Committee from here means logging out and choosing again, not a
-  // shortcut sitting here.
+  // "Switch to Admin view" only ever appears when bothAvailable (same gate
+  // as AdminHomeScreen's own "Switch to Resident view" above) - a
+  // resident-only member never sees it, on this screen or anywhere else,
+  // since onSwitchToAdmin is simply never passed a function for them. This
+  // used to be a one-way trip on purpose (logging out and choosing again
+  // was the only way back to Admin from here) - the user asked for it to
+  // be symmetric instead, matching the round trip that already existed in
+  // the other direction.
   const houseAssignments = membership.houseAssignments || [];
   const effectiveAssignment =
     houseAssignments.find((assignment) => assignment.id === residentAssignmentId) ||
@@ -405,19 +431,35 @@ function AuthenticatedApp() {
     );
   }
 
+  if (showHouseProfile) {
+    return (
+      <HouseProfileScreen
+        houseId={effectiveAssignment.houses?.id}
+        onBack={() => setShowHouseProfile(false)}
+        onChangePassword={() => setShowChangePassword(true)}
+      />
+    );
+  }
+
+  if (showSocietyListings) {
+    return (
+      <SocietyListingsScreen societyId={membership.society?.id} onBack={() => setShowSocietyListings(false)} />
+    );
+  }
+
   return (
     <ResidentHomeScreen
       assignment={effectiveAssignment}
       openBillingPeriods={membership.openBillingPeriods}
-      userEmail={me.user?.email}
-      phoneNumber={membership.phoneNumber}
       onPayDues={() => setPayDuesHouseId(effectiveAssignment.houses?.id)}
-      onViewTransactions={() => setShowMyTransactions(true)}
+      onViewTransactions={() => setMyTransactionsTarget(effectiveAssignment.houses)}
       onViewHistory={() => setHistoryTarget(effectiveAssignment.houses)}
       onViewWaterCharges={() =>
         setWaterChargeTarget({ house: effectiveAssignment.houses, society: membership.society })
       }
-      onChangePassword={() => setShowChangePassword(true)}
+      onViewProfile={() => setShowHouseProfile(true)}
+      onViewListings={() => setShowSocietyListings(true)}
+      onSwitchToAdmin={bothAvailable ? () => setMode('admin') : undefined}
       onBack={houseAssignments.length > 1 ? () => setResidentAssignmentId(null) : undefined}
       onLogout={houseAssignments.length > 1 ? undefined : logout}
       refreshing={refreshing}

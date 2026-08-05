@@ -16,7 +16,7 @@ function formatMoney(amount) {
 }
 
 function formatDate(value) {
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 function formatMonth(periodMonth) {
@@ -65,16 +65,22 @@ function statusTextStyle(status) {
 
 // The Admin/Committee-facing "view transactions for a house" screen
 // (workflow S.No 23) - every payment ever submitted against this one
-// house, backed by GET /houses/:houseId/transactions (already existed for
-// a while with no screen calling it - RLS on that route already lets any
-// Admin/Committee member of the society see any house's transactions).
-// Reached from a "Transactions" tile on HouseDashboardScreen.
+// house, backed by GET /houses/:houseId/transactions. Reached from a
+// "Transactions" tile on HouseDashboardScreen.
+//
+// Rendered as a table (Date/Type/Amount/Status columns, zebra-striped
+// rows), same layout MyTransactionsScreen uses - no separate House column
+// here since this screen is already scoped to one house (its own title).
+// The UTR/Cash reference and which month(s) a payment covers don't fit in
+// a single compact row, so tapping a row expands it in place to reveal
+// them instead of dropping that detail.
 export default function HouseTransactionsScreen({ house, onBack }) {
   const { accessToken } = useAuth();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -128,22 +134,50 @@ export default function HouseTransactionsScreen({ house, onBack }) {
       ) : transactions.length === 0 ? (
         <Text style={styles.empty}>No payments recorded for this house yet.</Text>
       ) : (
-        transactions.map((transaction) => (
-          <View key={transaction.id} style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.amount}>{formatMoney(transaction.amount)}</Text>
-              <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
-                <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
-                  {transaction.processing_status}
-                </Text>
-              </View>
-            </View>
-            <Text style={styles.meta}>
-              {transaction.transaction_type} • {formatPaymentReference(transaction)} • {formatDate(transaction.created_at)}
-            </Text>
-            <Text style={styles.meta}>{describeAllocations(transaction)}</Text>
+        <View style={styles.table}>
+          <View style={styles.tableHeaderRow}>
+            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
+            <Text style={[styles.headerCell, styles.colStatus]}>Status</Text>
           </View>
-        ))
+          {transactions.map((transaction, index) => {
+            const isExpanded = expandedId === transaction.id;
+            return (
+              <TouchableOpacity
+                key={transaction.id}
+                activeOpacity={0.7}
+                onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
+              >
+                <View style={styles.tableRowLine}>
+                  <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                    {formatDate(transaction.created_at)}
+                  </Text>
+                  <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                    {transaction.transaction_type}
+                  </Text>
+                  <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
+                    {formatMoney(transaction.amount)}
+                  </Text>
+                  <View style={[styles.colStatus, styles.cellStatusWrap]}>
+                    <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
+                      <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
+                        {transaction.processing_status}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+                {isExpanded ? (
+                  <View style={styles.detailBox}>
+                    <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                    <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                  </View>
+                ) : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       )}
     </ScrollView>
   );
@@ -191,26 +225,74 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 20,
   },
-  card: {
+  table: {
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 16,
-    marginBottom: 14,
     borderWidth: 1,
     borderColor: '#e6e6e6',
+    overflow: 'hidden',
   },
-  cardHeader: {
+  tableHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eeeeee',
   },
-  amount: {
-    fontSize: 18,
+  headerCell: {
+    fontSize: 11,
     fontWeight: '700',
+    color: '#8a8a8e',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
-  meta: {
-    fontSize: 13,
+  tableRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  tableRowZebra: {
+    backgroundColor: '#fafafa',
+  },
+  tableRowLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  cellText: {
+    fontSize: 12,
+    color: '#1c1c1e',
+  },
+  cellMuted: {
+    color: '#6e6e73',
+  },
+  cellAmount: {
+    fontWeight: '700',
+    textAlign: 'right',
+  },
+  cellStatusWrap: {
+    alignItems: 'flex-end',
+  },
+  colDate: {
+    flex: 1.1,
+  },
+  colType: {
+    flex: 1.3,
+  },
+  colAmount: {
+    flex: 1.2,
+    textAlign: 'right',
+  },
+  colStatus: {
+    flex: 1.1,
+  },
+  detailBox: {
+    backgroundColor: '#f0f4fb',
+    borderRadius: 6,
+    padding: 10,
+    marginTop: 10,
+  },
+  detailText: {
+    fontSize: 12,
     color: '#6e6e73',
     marginTop: 2,
   },

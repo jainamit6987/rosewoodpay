@@ -8,6 +8,127 @@ const PG_UNIQUE_VIOLATION = '23505';
 const MAX_MONTHS_PER_REQUEST = 24; // guardrail against a fat-fingered "months" value, not a real business rule
 const MAX_SEARCH_RESULTS = 5;
 
+// The CALLER's OWN Active relationship_type on this specific house, or
+// null if they do not have one - not just "someone" visible under RLS.
+// This distinction matters because resident_house_assignments' own
+// SELECT policies are role-dependent: a plain resident only ever sees
+// their OWN rows there, so for them a non-empty result already implies
+// it is theirs - but an Admin/Committee caller's broader "view every
+// assignment in the society" policy would also return e.g. the REAL
+// owner's row for a house they do not themselves own, which a bare
+// "does any Owner row exist" check would wrongly treat as
+// authorization. Joining through society_members.auth_user_id and
+// filtering in JS here is what actually closes that gap, regardless of
+// which RLS policy happened to let the row through. Shared by both the
+// available-to-rent toggle (Owner-only) and the house profile route
+// (any resident) below.
+async function getOwnActiveRelationshipOnHouse(supabase, userId, houseId) {
+  const { data, error } = await supabase
+    .from('resident_house_assignments')
+    .select('relationship_type, society_members!inner(auth_user_id)')
+    .eq('house_id', houseId)
+    .eq('status', 'Active');
+  if (error) throw new Error(error.message);
+  const own = (data || []).find((row) => row.society_members?.auth_user_id === userId);
+  return own ? own.relationship_type : null;
+}
+
+async function requireActiveOwnerOfHouse(supabase, userId, houseId) {
+  return (await getOwnActiveRelationshipOnHouse(supabase, userId, houseId)) === 'Owner';
+}
+
+// GET /listings?society_id= - any Active member of that society (no
+// Admin/Committee/resident-of-that-house restriction - this is a
+// same-society-wide noticeboard, a deliberately wider trust boundary than
+// GET /:houseId/profile's "just the two housemates sharing one house"
+// scope, discussed directly with the user). Returns every house currently
+// marked available_to_rent in that society, each with its own Owner's
+// name/mobile/email attached directly - the whole point of a listing is
+// to be contactable, and the owner already opted into exactly that by
+// flipping the flag on (see PATCH /:houseId/available-to-rent).
+//
+// No separate 403 check here on purpose: the houses query below already
+// goes through the caller's own req.supabase, so the existing "Residents
+// can view houses in their society" RLS policy silently returns nothing
+// for a society_id the caller does not actually belong to - same
+// "let RLS do the gating, this route only distinguishes shapes" pattern
+// GET /:houseId/transactions and GET /:houseId/billing-periods already
+// use below, rather than a fresh explicit membership lookup for a route
+// that has no house-specific id to check against anyway.
+router.get('/listings', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const societyId = typeof req.query.society_id === 'string' ? req.query.society_id.trim() : '';
+
+  if (!societyId) {
+    return res.status(400).json({ error: 'society_id is required.' });
+  }
+
+  const { data: houses, error: housesError } = await supabase
+    .from('houses')
+    .select('id, house_number, type')
+    .eq('society_id', societyId)
+    .eq('available_to_rent', true)
+    .order('house_number', { ascending: true });
+
+  if (housesError) {
+    return res.status(500).json({ error: housesError.message });
+  }
+  if (!houses || houses.length === 0) {
+    return res.json([]);
+  }
+
+  const houseIds = houses.map((h) => h.id);
+
+  // supabaseAdmin from here on - same reasoning as GET /:houseId/profile's
+  // own note: a plain member's req.supabase token only ever sees their OWN
+  // resident_house_assignments row under RLS, never another resident's
+  // (here, likely a total stranger's, not even a housemate's). The houses
+  // query above is what already proved same-society membership; this only
+  // widens WHAT the already-authorized caller gets back for each listed
+  // house, not WHO may ask.
+  const { data: ownerAssignments, error: assignmentsError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .select('house_id, society_members(name, auth_user_id, phone_number)')
+    .in('house_id', houseIds)
+    .eq('relationship_type', 'Owner')
+    .eq('status', 'Active');
+
+  if (assignmentsError) {
+    return res.status(500).json({ error: assignmentsError.message });
+  }
+
+  const ownerByHouseId = new Map();
+  for (const assignment of ownerAssignments || []) {
+    if (!ownerByHouseId.has(assignment.house_id)) {
+      ownerByHouseId.set(assignment.house_id, assignment);
+    }
+  }
+
+  const listings = await Promise.all(
+    houses.map(async (house) => {
+      const match = ownerByHouseId.get(house.id);
+      let email = null;
+      const authUserId = match?.society_members?.auth_user_id;
+      if (authUserId) {
+        const { data: userData } = await supabaseAdmin.auth.admin.getUserById(authUserId);
+        email = userData?.user?.email || null;
+      }
+      return {
+        id: house.id,
+        house_number: house.house_number,
+        type: house.type,
+        owner: {
+          name: match?.society_members?.name || null,
+          phoneNumber: match?.society_members?.phone_number || null,
+          email,
+        },
+      };
+    })
+  );
+
+  res.json(listings);
+});
+
 // Admin/Committee-only: case-insensitive partial match on house_number OR
 // owner_name, across every society the caller administers or sits on the
 // committee of - the same "collect societyIds from an Active is_admin/
@@ -246,6 +367,187 @@ router.get('/:houseId/dashboard', authenticate, async (req, res) => {
     lastPayment,
     residents,
   });
+});
+
+// GET /:houseId/profile - any Active resident (Owner/Tenant/Occupant) of
+// THIS specific house, verified via getOwnActiveRelationshipOnHouse
+// above (not just "any assignment visible under RLS" - see that
+// function's own note on why an Admin/Committee caller's broader
+// visibility would otherwise slip through). Deliberately shows every
+// housemate their OTHER housemate's own contact info (Owner sees the
+// Tenant's phone/email and vice versa) - discussed directly with the
+// user: a new, intentional trust boundary that did not exist before
+// (GET /me only ever showed a resident their OWN contact info), scoped
+// to exactly the residents sharing one house, nothing wider. "Owner
+// Name" deliberately still comes from the house's own free-text
+// owner_name field (same source ResidentHomeScreen's table already
+// used), NOT from whichever member happens to hold the Owner
+// assignment - the user chose to keep that field exactly as-is; only
+// the Owner's phone/email (which owner_name alone can never carry) come
+// from the actual Owner assignment's member record. If a house ever
+// somehow has more than one Active Owner or Tenant (schema allows co-
+// owners), this deliberately only ever surfaces the first one found of
+// each - the user confirmed a single Owner + single Tenant slot is
+// enough for this page.
+router.get('/:houseId/profile', authenticate, async (req, res) => {
+  const { houseId } = req.params;
+  const supabase = req.supabase;
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, house_number, owner_name, available_to_rent')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  let viewerRelationshipType;
+  try {
+    viewerRelationshipType = await getOwnActiveRelationshipOnHouse(supabase, req.user.id, houseId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!viewerRelationshipType) {
+    return res.status(403).json({ error: 'Only a resident of this house can view its profile.' });
+  }
+
+  // supabaseAdmin from here on - RLS's own "Residents can view their own
+  // active assignments" policy would otherwise hide every OTHER
+  // resident's row from a plain resident's own req.supabase token (e.g.
+  // a Tenant querying this would never see the Owner's own assignment
+  // row); the residency check above is what actually authorizes reading
+  // past that, same reasoning as GET /:houseId/dashboard's own Admin-only
+  // use of supabaseAdmin for the same underlying reason.
+  const { data: allAssignments, error: allError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .select('relationship_type, society_members(name, auth_user_id, phone_number)')
+    .eq('house_id', houseId)
+    .eq('status', 'Active');
+
+  if (allError) {
+    return res.status(500).json({ error: allError.message });
+  }
+
+  const buildContact = async (relationshipType) => {
+    const match = (allAssignments || []).find((a) => a.relationship_type === relationshipType);
+    if (!match) return null;
+    let email = null;
+    const authUserId = match.society_members?.auth_user_id;
+    if (authUserId) {
+      const { data: userData } = await supabaseAdmin.auth.admin.getUserById(authUserId);
+      email = userData?.user?.email || null;
+    }
+    return {
+      name: match.society_members?.name || null,
+      phoneNumber: match.society_members?.phone_number || null,
+      email,
+    };
+  };
+
+  const [owner, tenant] = await Promise.all([buildContact('Owner'), buildContact('Tenant')]);
+
+  res.json({
+    house: {
+      id: house.id,
+      house_number: house.house_number,
+      owner_name: house.owner_name,
+      available_to_rent: house.available_to_rent,
+    },
+    viewerRelationshipType,
+    owner,
+    tenant,
+  });
+});
+
+// PATCH /:houseId/available-to-rent - Owner-only (an Active Owner
+// assignment on THIS specific house, not just any Admin/Committee member
+// of its society - see requireActiveOwnerOfHouse above). Toggles the
+// simple boolean flag an owner uses to signal "I want to rent this house
+// out"; see 20260805000000_add_available_to_rent_to_houses.sql for why
+// this is a single column rather than a separate listings table
+// (discussed directly with the user: no rent amount/contact/notes/history
+// was ever asked for - just this flag plus the house's own already-
+// existing house_number/owner_name for display). The resident-facing
+// "browse all available houses" screen is a deliberately separate, later
+// follow-up; this endpoint only covers an owner managing their own
+// house's flag from their own dashboard.
+router.patch('/:houseId/available-to-rent', authenticate, async (req, res) => {
+  const { houseId } = req.params;
+  const { available_to_rent } = req.body || {};
+  const supabase = req.supabase;
+
+  if (typeof available_to_rent !== 'boolean') {
+    return res.status(400).json({ error: 'available_to_rent must be a boolean.' });
+  }
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, society_id, available_to_rent')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  let isOwner;
+  try {
+    isOwner = await requireActiveOwnerOfHouse(supabase, req.user.id, houseId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!isOwner) {
+    return res.status(403).json({ error: 'Only an Active Owner of this house can change its available-to-rent flag.' });
+  }
+
+  if (house.available_to_rent === available_to_rent) {
+    return res.status(409).json({
+      error: `This house is already marked as ${available_to_rent ? 'available' : 'not available'} to rent.`,
+    });
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('houses')
+    .update({ available_to_rent, updated_at: new Date().toISOString() })
+    .eq('id', houseId)
+    .select('id, house_number, available_to_rent')
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  // audit_events' own INSERT policy is Admin-only ("Admins can insert
+  // audit events for their society") - an Owner's own req.supabase token
+  // has no write access to it at all, so this uses supabaseAdmin (service
+  // role) instead, same as every other resident-triggered audit write in
+  // this codebase already has to (see autoClearAvailableToRent in
+  // routes/assignments.js for the identical reasoning).
+  const { error: auditError } = await supabaseAdmin.from('audit_events').insert({
+    society_id: house.society_id,
+    actor_user_id: req.user.id,
+    entity_type: 'house',
+    entity_id: houseId,
+    action: available_to_rent ? 'MarkedAvailableToRent' : 'MarkedNotAvailableToRent',
+    metadata: {},
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Flag updated but the audit log entry failed: ${auditError.message}`,
+      house: updated,
+    });
+  }
+
+  res.json(updated);
 });
 
 // Same "walk forward one month from the house's own last row, or from the

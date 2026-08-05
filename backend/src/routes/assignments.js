@@ -75,6 +75,40 @@ async function hasOtherActiveOwner(supabase, houseId, excludeAssignmentId) {
   return (data || []).length > 0;
 }
 
+// Auto-clears a house's owner-managed available_to_rent flag the moment
+// it actually gains a new Active Tenant/Occupant assignment - see
+// 20260805000000_add_available_to_rent_to_houses.sql's own column
+// comment. Called from both /:id/approve and /:id/reassign below, the
+// only two places a Tenant/Occupant assignment ever goes Active. Uses
+// supabaseAdmin (service role), not the calling Admin's own req.supabase -
+// the new "Owners can update..." RLS policy on houses only grants this
+// specific UPDATE to the house's own Owner, and the Admin approving/
+// reassigning a tenant is essentially never that same person; this is a
+// system-triggered side effect of an already-authorized Admin action
+// (isAdmin is already confirmed by the caller before this ever runs), not
+// a new capability being handed to the Admin, so bypassing RLS here is
+// the same class of exception the Admin API calls elsewhere in this
+// codebase already are. Deliberately does not fail the whole approve/
+// reassign call if this side effect errors - approving a tenant should
+// never be blocked by a problem clearing an unrelated flag; at worst it
+// is left stale until the owner notices and withdraws it themselves.
+async function autoClearAvailableToRent(houseId, relationshipType, societyId, actorUserId) {
+  if (relationshipType !== 'Tenant' && relationshipType !== 'Occupant') return;
+
+  const { data: house } = await supabaseAdmin.from('houses').select('id, available_to_rent').eq('id', houseId).maybeSingle();
+  if (!house || !house.available_to_rent) return;
+
+  await supabaseAdmin.from('houses').update({ available_to_rent: false }).eq('id', houseId);
+  await supabaseAdmin.from('audit_events').insert({
+    society_id: societyId,
+    actor_user_id: actorUserId,
+    entity_type: 'house',
+    entity_id: houseId,
+    action: 'AutoDelistedOnNewTenant',
+    metadata: {},
+  });
+}
+
 // Shared by approve/revoke/reassign, mirroring loadTransactionAndCheckAdmin
 // in transactions.js and loadMemberAndCheckAdmin in members.js.
 // resident_house_assignments has no society_id column of its own - it's
@@ -326,6 +360,8 @@ router.post('/:id/approve', authenticate, async (req, res) => {
     });
   }
 
+  await autoClearAvailableToRent(assignment.house_id, assignment.relationship_type, societyId, req.user.id).catch(() => {});
+
   res.json(updated);
 });
 
@@ -563,6 +599,8 @@ router.post('/:id/reassign', authenticate, async (req, res) => {
       assignment: created,
     });
   }
+
+  await autoClearAvailableToRent(targetHouseId, targetRelationship, societyId, req.user.id).catch(() => {});
 
   res.json({ revokedAssignmentId: id, assignment: created });
 });
