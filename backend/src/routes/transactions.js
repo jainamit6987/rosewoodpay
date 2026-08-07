@@ -25,6 +25,18 @@ const PG_INSUFFICIENT_PRIVILEGE = '42501';
 const TRANSACTION_TYPES = ['Maintenance', 'WaterCharge', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
 const EXPENSE_TYPES = ['UtilityBill', 'Salary', 'Other'];
+const OTHER_TYPE = 'Other';
+
+// Kept in sync with the chk_direction/chk_direction_matches_type CHECK
+// constraints added in 20260807000000_add_direction_and_month_end_closing.sql,
+// which replaced the Month-End Closing report's old "infer Cr/Dr purely
+// from transaction_type" logic. Maintenance/WaterCharge are unconditionally
+// forced to 'Cr' and UtilityBill/Salary are unconditionally forced to 'Dr'
+// below, regardless of any caller input - only Other actually reads a
+// caller-supplied direction, since it is the one type that can genuinely be
+// either a miscellaneous receipt (Cr, e.g. a refund/interest credit) or a
+// miscellaneous payment (Dr, e.g. a donation given/misc purchase).
+const DIRECTIONS = ['Cr', 'Dr'];
 
 // Kept in sync with the chk_payment_mode CHECK constraint, extended in
 // 20260802000000_extend_expense_payment_modes_and_description.sql. UPI is
@@ -90,6 +102,7 @@ router.post('/', authenticate, async (req, res) => {
     payee_name,
     payment_mode,
     description,
+    direction,
   } = req.body || {};
 
   if (amount === undefined || amount === null) {
@@ -151,6 +164,20 @@ router.post('/', authenticate, async (req, res) => {
   // here would just be theater - the Admin recording it is already the
   // attestation that it's real.
   if (EXPENSE_TYPES.includes(resolvedTransactionType)) {
+    // Only Other can actually choose its direction - see the DIRECTIONS
+    // comment above. Defaults to 'Dr' when omitted so every existing
+    // client/seed/test row that predates this field (an Other expense)
+    // keeps behaving exactly as it did before this field existed.
+    let resolvedDirection;
+    if (resolvedTransactionType === OTHER_TYPE) {
+      resolvedDirection = direction || 'Dr';
+      if (!DIRECTIONS.includes(resolvedDirection)) {
+        return res.status(400).json({ error: `direction must be one of: ${DIRECTIONS.join(', ')}.` });
+      }
+    } else {
+      resolvedDirection = 'Dr';
+    }
+
     if (house_id) {
       return res.status(400).json({
         error: `house_id must not be provided for ${resolvedTransactionType} transactions - they are society-level expenses, not owed by any house.`,
@@ -161,7 +188,10 @@ router.post('/', authenticate, async (req, res) => {
     }
     if (!payee_name || typeof payee_name !== 'string' || !payee_name.trim()) {
       return res.status(400).json({
-        error: 'payee_name is required for non-Maintenance transactions (who or what was paid).',
+        error:
+          resolvedDirection === 'Cr'
+            ? 'payee_name is required for Other income transactions (who or what this money came from).'
+            : 'payee_name is required for non-Maintenance transactions (who or what was paid).',
       });
     }
     if (!description || typeof description !== 'string' || !description.trim()) {
@@ -205,6 +235,7 @@ router.post('/', authenticate, async (req, res) => {
         proof_file_path: proof_file_path || null,
         txn_date: txn_date || null,
         transaction_type: resolvedTransactionType,
+        direction: resolvedDirection,
         payment_mode: resolvedPaymentMode,
         payee_name: payee_name.trim(),
         description: description.trim(),
@@ -239,6 +270,7 @@ router.post('/', authenticate, async (req, res) => {
         payee_name: transaction.payee_name,
         description: transaction.description,
         transaction_type: transaction.transaction_type,
+        direction: transaction.direction,
         auto_verified: true,
       },
     });
@@ -456,6 +488,7 @@ router.post('/', authenticate, async (req, res) => {
       proof_file_path: proof_file_path || null,
       txn_date: txn_date || null,
       transaction_type: resolvedTransactionType,
+      direction: 'Cr', // Maintenance/WaterCharge are always a resident paying the society - see DIRECTIONS comment above.
       payment_mode: resolvedPaymentMode,
       description: description ? description.trim() : null,
       ...(resolvedPaymentMode === CASH_MODE
@@ -600,7 +633,7 @@ router.get('/pending', authenticate, async (req, res) => {
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, direction, utr_number, payment_mode, payee_name, description, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')
@@ -715,7 +748,7 @@ router.get('/report', authenticate, async (req, res) => {
   let query = supabase
     .from('transactions')
     .select(
-      `id, society_id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
+      `id, society_id, house_id, submitted_by, amount, transaction_type, direction, utr_number, payment_mode, payee_name, description, txn_date, payment_status, processing_status, verified_by, verified_at, created_at, houses(house_number), ${allocationsEmbed}(billing_period_id, amount_allocated)`
     )
     .in('society_id', societyIds)
     .order('created_at', { ascending: false });
@@ -785,7 +818,7 @@ router.get('/mine', authenticate, async (req, res) => {
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, description, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, house_id, submitted_by, amount, transaction_type, direction, utr_number, payment_mode, description, txn_date, payment_status, processing_status, verified_at, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('house_id', houseIds)
     .order('created_at', { ascending: false });
@@ -1029,6 +1062,10 @@ router.post('/:id/reject', authenticate, async (req, res) => {
       payment_status: 'Failed',
       verified_by: req.user.id,
       verified_at: new Date().toISOString(),
+      // Resident-readable copy of the same string below - see
+      // 20260807010000_add_rejection_reason_to_transactions.sql for why this
+      // duplicates rather than replaces the audit_events entry.
+      rejection_reason: reason.trim(),
     })
     .eq('id', id)
     .select()

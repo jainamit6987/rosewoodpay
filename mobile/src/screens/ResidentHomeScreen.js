@@ -12,6 +12,18 @@ function formatDate(value) {
   return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+// First token of the member's full name (e.g. "Ananya Iyer" -> "Ananya") -
+// there is no separate first/last name column, name is stored as one
+// free-text field (society_members.name). Falls back to null (renders
+// nothing) rather than an empty greeting when the name hasn't loaded yet or
+// is blank, same defensive-null-check convention as formatMoney/formatDate
+// above never being called on missing data.
+function firstName(fullName) {
+  const trimmed = (fullName || '').trim();
+  if (!trimmed) return null;
+  return trimmed.split(/\s+/)[0];
+}
+
 // "Current billing period" here is this calendar month's own period,
 // whatever its status - see backend/src/routes/me.js's currentPeriod. It is
 // deliberately not the same figure as "Current Due" below, which is the
@@ -50,6 +62,7 @@ function currentPeriodLabel(currentPeriod) {
 // out and choosing again at ModeChooserScreen), which the user pointed out
 // was an asymmetry, not a deliberate restriction worth keeping.
 export default function ResidentHomeScreen({
+  residentName,
   assignment,
   openBillingPeriods,
   onPayDues,
@@ -64,6 +77,7 @@ export default function ResidentHomeScreen({
   refreshing,
   onRefresh,
 }) {
+  const greetingName = firstName(residentName);
   const house = assignment?.houses;
   const housePeriods = (openBillingPeriods || []).filter((period) => period.house_id === house?.id);
   const currentDue = housePeriods.reduce((sum, period) => sum + Number(period.amount_due), 0);
@@ -97,6 +111,12 @@ export default function ResidentHomeScreen({
           </View>
         </TouchableOpacity>
         <View style={{ flex: 1, marginLeft: 12 }}>
+          {/* "Add above" placement from the greeting mockup (canvases/
+              dashboard-greeting-mockup.canvas.tsx) - italic, its own line,
+              existing "Resident dashboard" subtitle kept unchanged below
+              it. Only rendered once a name has actually loaded - no
+              "Hi, " placeholder flash before /me resolves. */}
+          {greetingName ? <Text style={styles.greeting}>{`Hi, ${greetingName}`}</Text> : null}
           <Text style={styles.subtitle}>Resident dashboard</Text>
         </View>
         {onLogout ? (
@@ -231,6 +251,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
     lineHeight: 12,
+  },
+  greeting: {
+    fontSize: 15,
+    fontStyle: 'italic',
+    fontWeight: '600',
+    color: '#1c1c1e',
   },
   subtitle: {
     fontSize: 14,

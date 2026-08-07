@@ -11,12 +11,14 @@ import AdminHomeScreen from './src/screens/AdminHomeScreen';
 import HousesScreen from './src/screens/HousesScreen';
 import ModeChooserScreen from './src/screens/ModeChooserScreen';
 import BillingHistoryScreen from './src/screens/BillingHistoryScreen';
+import MaintenanceReceiptScreen from './src/screens/MaintenanceReceiptScreen';
 import MyTransactionsScreen from './src/screens/MyTransactionsScreen';
 import SocietyScreen from './src/screens/SocietyScreen';
 import ResidentHomeScreen from './src/screens/ResidentHomeScreen';
 import SelectHouseScreen from './src/screens/SelectHouseScreen';
 import HouseDashboardScreen from './src/screens/HouseDashboardScreen';
 import HouseProfileScreen from './src/screens/HouseProfileScreen';
+import SocietyProfileScreen from './src/screens/SocietyProfileScreen';
 import SocietyListingsScreen from './src/screens/SocietyListingsScreen';
 import HouseTransactionsScreen from './src/screens/HouseTransactionsScreen';
 import MembersScreen from './src/screens/MembersScreen';
@@ -24,6 +26,7 @@ import CreateMemberScreen from './src/screens/CreateMemberScreen';
 import MemberDetailScreen from './src/screens/MemberDetailScreen';
 import PendencyReportScreen from './src/screens/PendencyReportScreen';
 import TransactionReportScreen from './src/screens/TransactionReportScreen';
+import MonthEndClosingScreen from './src/screens/MonthEndClosingScreen';
 import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
 import WaterChargeScreen from './src/screens/WaterChargeScreen';
 import ChangePasswordScreen from './src/screens/ChangePasswordScreen';
@@ -41,6 +44,12 @@ import ChangePasswordScreen from './src/screens/ChangePasswordScreen';
 function AuthenticatedApp() {
   const [paymentTarget, setPaymentTarget] = useState(null);
   const [historyTarget, setHistoryTarget] = useState(null);
+  // Drill-down from a single row's "View Receipt" link on
+  // BillingHistoryScreen (see historyTarget above) - a {house, periodId}
+  // pair, not just the period id alone, since MaintenanceReceiptScreen's own
+  // API call is house-scoped the same way every other billing-period route
+  // in this codebase already is.
+  const [receiptTarget, setReceiptTarget] = useState(null);
   // Which house-assignment's dashboard the resident is currently looking at
   // - stored as just an id, not the whole object, and re-resolved against
   // the latest houseAssignments on every render below, so a pull-to-refresh
@@ -90,6 +99,11 @@ function AuthenticatedApp() {
   // effectiveMode below) - reachable only from there, once effectiveMode is
   // already 'admin', so there is no separate access check needed here.
   const [showSociety, setShowSociety] = useState(false);
+  // AdminHomeScreen's own spoke, off tapping the society name in its
+  // header - just a boolean, same shape as showHouseProfile below (nothing
+  // else needs to be carried through, the society it shows is always the
+  // current membership's own).
+  const [showSocietyProfile, setShowSocietyProfile] = useState(false);
   // Drill-down from a specific society card on SocietyScreen (see that
   // screen's own "View Pendency Report" link) - a whole society object,
   // not just an id, since PendencyReportScreen needs its name for the
@@ -100,6 +114,9 @@ function AuthenticatedApp() {
   // independent spoke off the same society card on SocietyScreen (see that
   // screen's own report tiles), not a variant of the pendency report.
   const [transactionReportTarget, setTransactionReportTarget] = useState(null);
+  // Same shape/reasoning as pendencyReportTarget/transactionReportTarget
+  // above - the third report spoke off the same SocietyScreen card.
+  const [monthEndClosingTarget, setMonthEndClosingTarget] = useState(null);
   const [showHouses, setShowHouses] = useState(false);
   const [showReviewQueue, setShowReviewQueue] = useState(false);
   // Members hub spokes off AdminHomeScreen, same shape as showHouses/
@@ -255,8 +272,27 @@ function AuthenticatedApp() {
     );
   }
 
+  // Checked before historyTarget below - a drill-down set on top of it,
+  // same "clearing this one piece of state falls back to whichever screen
+  // underneath is still set" shape as memberDetailTarget/houseDashboardTarget.
+  if (receiptTarget) {
+    return (
+      <MaintenanceReceiptScreen
+        house={receiptTarget.house}
+        periodId={receiptTarget.periodId}
+        onBack={() => setReceiptTarget(null)}
+      />
+    );
+  }
+
   if (historyTarget) {
-    return <BillingHistoryScreen house={historyTarget} onBack={() => setHistoryTarget(null)} />;
+    return (
+      <BillingHistoryScreen
+        house={historyTarget}
+        onBack={() => setHistoryTarget(null)}
+        onViewReceipt={(period) => setReceiptTarget({ house: historyTarget, periodId: period.id })}
+      />
+    );
   }
 
   if (houseTransactionsTarget) {
@@ -270,12 +306,19 @@ function AuthenticatedApp() {
   // piece of state) lands back on whichever of those the Admin came from,
   // not further back than that.
   if (memberDetailTarget) {
-    return <MemberDetailScreen member={memberDetailTarget} onBack={() => setMemberDetailTarget(null)} />;
+    return (
+      <MemberDetailScreen
+        isAdmin={!!membership.isAdmin}
+        member={memberDetailTarget}
+        onBack={() => setMemberDetailTarget(null)}
+      />
+    );
   }
 
   if (houseDashboardTarget) {
     return (
       <HouseDashboardScreen
+        isAdmin={!!membership.isAdmin}
         house={houseDashboardTarget}
         onViewTransactions={() => setHouseTransactionsTarget(houseDashboardTarget)}
         onViewHistory={() => setHistoryTarget(houseDashboardTarget)}
@@ -315,14 +358,30 @@ function AuthenticatedApp() {
     );
   }
 
+  if (monthEndClosingTarget) {
+    return (
+      <MonthEndClosingScreen
+        society={monthEndClosingTarget}
+        isAdmin={!!membership.isAdmin}
+        onBack={() => setMonthEndClosingTarget(null)}
+      />
+    );
+  }
+
   if (showSociety) {
     return (
       <SocietyScreen
+        isAdmin={!!membership.isAdmin}
         onBack={() => setShowSociety(false)}
         onViewPendencyReport={setPendencyReportTarget}
         onViewTransactionReport={setTransactionReportTarget}
+        onViewMonthEndClosing={setMonthEndClosingTarget}
       />
     );
+  }
+
+  if (showSocietyProfile) {
+    return <SocietyProfileScreen onBack={() => setShowSocietyProfile(false)} />;
   }
 
   if (showHouses) {
@@ -342,6 +401,7 @@ function AuthenticatedApp() {
   if (showMembers) {
     return (
       <MembersScreen
+        isAdmin={!!membership.isAdmin}
         onBack={() => setShowMembers(false)}
         onSelectMember={setMemberDetailTarget}
         onCreateMember={() => setShowCreateMember(true)}
@@ -369,7 +429,7 @@ function AuthenticatedApp() {
   }
 
   if (showReviewQueue) {
-    return <AdminReviewScreen onBack={() => setShowReviewQueue(false)} />;
+    return <AdminReviewScreen isAdmin={!!membership.isAdmin} onBack={() => setShowReviewQueue(false)} />;
   }
 
   const effectiveMode = mode || (hasAdminAccess ? 'admin' : 'resident');
@@ -381,11 +441,13 @@ function AuthenticatedApp() {
     // not a real mode switch.
     return (
       <AdminHomeScreen
+        isAdmin={!!membership.isAdmin}
         onReviewPayments={() => setShowReviewQueue(true)}
         onRecordExpense={() => setShowRecordExpense(true)}
         onViewHouses={() => setShowHouses(true)}
         onViewMembers={() => setShowMembers(true)}
         onViewSociety={() => setShowSociety(true)}
+        onViewSocietyProfile={() => setShowSocietyProfile(true)}
         // Only offered here when there is no alternative path to it - once
         // this member also has a house of their own (hasResidentAccess),
         // Change Password lives on HouseProfileScreen instead (reachable
@@ -449,6 +511,7 @@ function AuthenticatedApp() {
 
   return (
     <ResidentHomeScreen
+      residentName={membership.name}
       assignment={effectiveAssignment}
       openBillingPeriods={membership.openBillingPeriods}
       onPayDues={() => setPayDuesHouseId(effectiveAssignment.houses?.id)}

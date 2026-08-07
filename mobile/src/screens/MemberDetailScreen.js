@@ -38,7 +38,13 @@ function assignmentStatusTextStyle(status) {
 // reject (inline confirm) asymmetry - Reactivate applies right away,
 // Suspend needs an explicit inline confirmation first since it disables
 // the member's login outright.
-export default function MemberDetailScreen({ member, onBack }) {
+// isAdmin gates Edit/Suspend/Reactivate/Reset Password - PATCH /members/:id
+// and its three POST action endpoints are all Admin-only on the backend
+// (see routes/members.js's requireActiveAdmin checks), so a Committee-only
+// caller sees every detail here but none of the Account-section buttons,
+// replaced by a plain "View only" note instead of round-tripping into a
+// 403 after tapping Edit/Suspend/Reset Password.
+export default function MemberDetailScreen({ isAdmin, member, onBack }) {
   const { accessToken } = useAuth();
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -280,9 +286,11 @@ export default function MemberDetailScreen({ member, onBack }) {
             <Text style={styles.detailValue}>{formatDate(detail.createdAt)}</Text>
           </View>
 
-          <TouchableOpacity style={styles.editLink} onPress={startEdit}>
-            <Text style={styles.editLinkText}>Edit details</Text>
-          </TouchableOpacity>
+          {isAdmin ? (
+            <TouchableOpacity style={styles.editLink} onPress={startEdit}>
+              <Text style={styles.editLinkText}>Edit details</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       )}
 
@@ -308,7 +316,11 @@ export default function MemberDetailScreen({ member, onBack }) {
 
       <Text style={styles.sectionHeader}>Account</Text>
       <View style={styles.card}>
-        {resetTempPassword ? (
+        {!isAdmin ? (
+          <Text style={styles.viewOnlyNote}>
+            View only - resetting a password, suspending, or reactivating a member is an Admin-only action.
+          </Text>
+        ) : resetTempPassword ? (
           <View style={styles.tempPasswordBox}>
             <Text style={styles.tempPasswordLabel}>New temporary password (shown only once)</Text>
             <Text style={styles.tempPasswordValue}>{resetTempPassword}</Text>
@@ -355,39 +367,43 @@ export default function MemberDetailScreen({ member, onBack }) {
           </>
         )}
 
-        {statusActionError ? <Text style={styles.error}>{statusActionError}</Text> : null}
+        {isAdmin ? (
+          <>
+            {statusActionError ? <Text style={styles.error}>{statusActionError}</Text> : null}
 
-        {detail.status === 'Suspended' ? (
-          <TouchableOpacity style={styles.reactivateButton} onPress={handleReactivate} disabled={statusActionBusy}>
-            <Text style={styles.reactivateButtonText}>{statusActionBusy ? 'Reactivating…' : 'Reactivate Member'}</Text>
-          </TouchableOpacity>
-        ) : confirmingSuspend ? (
-          <View>
-            <Text style={styles.confirmText}>
-              This will disable {detail.name || 'this member'}'s login immediately. Continue?
-            </Text>
-            <View style={styles.actionRow}>
+            {detail.status === 'Suspended' ? (
+              <TouchableOpacity style={styles.reactivateButton} onPress={handleReactivate} disabled={statusActionBusy}>
+                <Text style={styles.reactivateButtonText}>{statusActionBusy ? 'Reactivating…' : 'Reactivate Member'}</Text>
+              </TouchableOpacity>
+            ) : confirmingSuspend ? (
+              <View>
+                <Text style={styles.confirmText}>
+                  This will disable {detail.name || 'this member'}'s login immediately. Continue?
+                </Text>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={styles.cancelButton}
+                    onPress={() => setConfirmingSuspend(false)}
+                    disabled={statusActionBusy}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.suspendButton} onPress={confirmSuspend} disabled={statusActionBusy}>
+                    <Text style={styles.suspendButtonText}>{statusActionBusy ? 'Suspending…' : 'Confirm suspend'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
               <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setConfirmingSuspend(false)}
+                style={styles.suspendOutlineButton}
+                onPress={() => setConfirmingSuspend(true)}
                 disabled={statusActionBusy}
               >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+                <Text style={styles.suspendOutlineButtonText}>Suspend Member</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.suspendButton} onPress={confirmSuspend} disabled={statusActionBusy}>
-                <Text style={styles.suspendButtonText}>{statusActionBusy ? 'Suspending…' : 'Confirm suspend'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
-          <TouchableOpacity
-            style={styles.suspendOutlineButton}
-            onPress={() => setConfirmingSuspend(true)}
-            disabled={statusActionBusy}
-          >
-            <Text style={styles.suspendOutlineButtonText}>Suspend Member</Text>
-          </TouchableOpacity>
-        )}
+            )}
+          </>
+        ) : null}
       </View>
     </ScrollView>
   );
@@ -565,6 +581,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#1c1c1e',
     marginBottom: 12,
+  },
+  viewOnlyNote: {
+    fontSize: 13,
+    color: '#8a8a8e',
+    fontStyle: 'italic',
   },
   suspendOutlineButton: {
     borderWidth: 1,

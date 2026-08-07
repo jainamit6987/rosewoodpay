@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import DateField from '../components/DateField';
 import { apiGet } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
@@ -24,26 +25,44 @@ function formatDate(value) {
   return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-// Kept in sync with routes/society.js's own PAYMENT_MODES labels (see
-// RecordExpenseScreen's identical lookup) - just the display label here,
-// since this screen only ever reads payment_mode back, never writes it.
-const PAYMENT_MODE_LABELS = {
-  UPI: 'UPI',
-  Cash: 'Cash',
-  NEFT_IMPS: 'NEFT/IMPS',
-  Cheque: 'Cheque',
-};
+// Kept in sync with routes/society.js's own PAYMENT_MODES list (see
+// RecordExpenseScreen's identical lookup) - also doubles as the Payment
+// Mode filter chips below, since the report only ever reads payment_mode
+// back, never writes it.
+const PAYMENT_MODES = [
+  { value: 'UPI', label: 'UPI' },
+  { value: 'Cash', label: 'Cash' },
+  { value: 'NEFT_IMPS', label: 'NEFT/IMPS' },
+  { value: 'Cheque', label: 'Cheque' },
+];
+
+const PAYMENT_MODE_LABELS = Object.fromEntries(PAYMENT_MODES.map((mode) => [mode.value, mode.label]));
 
 function formatPaymentMode(mode) {
   return PAYMENT_MODE_LABELS[mode] || mode;
 }
 
-function monthQueryParam(monthDate) {
-  return `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}`;
+// Same local-components-not-toISOString reasoning as DateField.web.js's
+// own toInputValue - avoids the UTC rollback that would otherwise send the
+// wrong calendar day for anyone west of UTC.
+function toDateOnly(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
-function monthLabel(monthDate) {
-  return monthDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function endOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
+}
+
+function rangeLabel(fromDate, toDate) {
+  const opts = { day: 'numeric', month: 'short', year: 'numeric' };
+  return `${fromDate.toLocaleDateString(undefined, opts)} \u2013 ${toDate.toLocaleDateString(undefined, opts)}`;
 }
 
 function escapeHtml(value) {
@@ -58,7 +77,7 @@ function escapeHtml(value) {
 // PendencyReportScreen's own buildReportHtml, same column order as the
 // on-screen table below (Txn Date, UTR/Ref No., Mode, Cr/Dr, Amount,
 // Description).
-function buildReportHtml({ societyName, monthText, rows, totalCr, totalDr }) {
+function buildReportHtml({ societyName, rangeText, modeText, rows, totalCr, totalDr }) {
   const tableRows = rows
     .map(
       (row) => `
@@ -90,7 +109,7 @@ function buildReportHtml({ societyName, monthText, rows, totalCr, totalDr }) {
       </head>
       <body>
         <h1>${escapeHtml(societyName)} \u2013 Transaction Report</h1>
-        <div class="subtitle">${escapeHtml(monthText)} \u2022 ${rows.length} transaction${rows.length === 1 ? '' : 's'}</div>
+        <div class="subtitle">${escapeHtml(rangeText)}${modeText ? ` \u2022 ${escapeHtml(modeText)}` : ''} \u2022 ${rows.length} transaction${rows.length === 1 ? '' : 's'}</div>
         <table>
           <thead>
             <tr>
@@ -117,19 +136,24 @@ function buildReportHtml({ societyName, monthText, rows, totalCr, totalDr }) {
 }
 
 // Admin/Committee "view transaction report at society level" - a flat,
-// whole-society ledger for a chosen calendar month, backed by
-// GET /society/:id/transaction-report. Every Verified transaction either
-// direction: Cr (a resident's Maintenance or WaterCharge payment, money in)
-// or Dr (a society expense - Salary/UtilityBill/Other, money out). Launched from
-// within a society's own card on SocietyScreen, same shape as
-// PendencyReportScreen (both are whole-society reports, not scoped to one
-// house).
+// whole-society ledger for a custom date range, backed by
+// GET /society/:id/transaction-report?from=&to=&mode=. Every Verified
+// transaction either direction: Cr (a resident's Maintenance or
+// WaterCharge payment, money in) or Dr (a society expense -
+// Salary/UtilityBill/Other, money out). Launched from within a society's
+// own card on SocietyScreen, same shape as PendencyReportScreen (both are
+// whole-society reports, not scoped to one house).
+//
+// Defaults to the current calendar month (same default the backend itself
+// falls back to when no filter is given at all), but From/To are freely
+// editable beyond that - "filter by dates" is a real from/to range here,
+// not just a month picker. Payment Mode is a separate, independent filter
+// that ANDs with whatever date range is in effect ("All" clears it).
 export default function TransactionReportScreen({ society, onBack }) {
   const { accessToken } = useAuth();
-  const [monthDate, setMonthDate] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
+  const [fromDate, setFromDate] = useState(() => startOfMonth(new Date()));
+  const [toDate, setToDate] = useState(() => endOfMonth(new Date()));
+  const [paymentMode, setPaymentMode] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -139,15 +163,14 @@ export default function TransactionReportScreen({ society, onBack }) {
   const load = useCallback(async () => {
     try {
       setError(null);
-      const data = await apiGet(
-        `/society/${society.id}/transaction-report?month=${monthQueryParam(monthDate)}`,
-        accessToken
-      );
+      const params = new URLSearchParams({ from: toDateOnly(fromDate), to: toDateOnly(toDate) });
+      if (paymentMode) params.set('mode', paymentMode);
+      const data = await apiGet(`/society/${society.id}/transaction-report?${params.toString()}`, accessToken);
       setTransactions(data.transactions || []);
     } catch (err) {
       setError(err.message);
     }
-  }, [accessToken, society.id, monthDate]);
+  }, [accessToken, society.id, fromDate, toDate, paymentMode]);
 
   useEffect(() => {
     setLoading(true);
@@ -160,14 +183,18 @@ export default function TransactionReportScreen({ society, onBack }) {
     setRefreshing(false);
   };
 
-  const shiftMonth = (delta) => {
-    setMonthDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  const resetToCurrentMonth = () => {
+    const now = new Date();
+    setFromDate(startOfMonth(now));
+    setToDate(endOfMonth(now));
   };
 
   const isCurrentMonth = useMemo(() => {
     const now = new Date();
-    return monthDate.getFullYear() === now.getFullYear() && monthDate.getMonth() === now.getMonth();
-  }, [monthDate]);
+    return (
+      toDateOnly(fromDate) === toDateOnly(startOfMonth(now)) && toDateOnly(toDate) === toDateOnly(endOfMonth(now))
+    );
+  }, [fromDate, toDate]);
 
   const { totalCr, totalDr } = useMemo(() => {
     let cr = 0;
@@ -184,7 +211,8 @@ export default function TransactionReportScreen({ society, onBack }) {
     try {
       const html = buildReportHtml({
         societyName: society.name,
-        monthText: monthLabel(monthDate),
+        rangeText: rangeLabel(fromDate, toDate),
+        modeText: paymentMode ? formatPaymentMode(paymentMode) : null,
         rows: transactions,
         totalCr,
         totalDr,
@@ -254,21 +282,41 @@ export default function TransactionReportScreen({ society, onBack }) {
         ) : null}
       </View>
 
-      <View style={styles.monthRow}>
-        <TouchableOpacity style={styles.monthArrow} onPress={() => shiftMonth(-1)}>
-          <Text style={styles.monthArrowText}>{'\u25C0'}</Text>
-        </TouchableOpacity>
-        <View style={styles.monthLabelBox}>
-          <Text style={styles.monthLabelText}>{monthLabel(monthDate)}</Text>
-          {!isCurrentMonth ? (
-            <TouchableOpacity onPress={() => setMonthDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1))}>
-              <Text style={styles.monthResetLink}>Jump to current month</Text>
-            </TouchableOpacity>
-          ) : null}
+      <View style={styles.filterCard}>
+        <View style={styles.dateRow}>
+          <View style={styles.dateField}>
+            <Text style={styles.filterLabel}>From</Text>
+            <DateField value={fromDate} onChange={setFromDate} maximumDate={toDate} />
+          </View>
+          <View style={styles.dateField}>
+            <Text style={styles.filterLabel}>To</Text>
+            <DateField value={toDate} onChange={setToDate} minimumDate={fromDate} maximumDate={new Date()} />
+          </View>
         </View>
-        <TouchableOpacity style={styles.monthArrow} onPress={() => shiftMonth(1)}>
-          <Text style={styles.monthArrowText}>{'\u25B6'}</Text>
-        </TouchableOpacity>
+        {!isCurrentMonth ? (
+          <TouchableOpacity onPress={resetToCurrentMonth}>
+            <Text style={styles.monthResetLink}>Reset to current month</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        <Text style={[styles.filterLabel, styles.paymentModeLabel]}>Payment Mode</Text>
+        <View style={styles.chipRow}>
+          <TouchableOpacity
+            style={[styles.chip, paymentMode === null && styles.chipActive]}
+            onPress={() => setPaymentMode(null)}
+          >
+            <Text style={[styles.chipText, paymentMode === null && styles.chipTextActive]}>All</Text>
+          </TouchableOpacity>
+          {PAYMENT_MODES.map((mode) => (
+            <TouchableOpacity
+              key={mode.value}
+              style={[styles.chip, paymentMode === mode.value && styles.chipActive]}
+              onPress={() => setPaymentMode(mode.value)}
+            >
+              <Text style={[styles.chipText, paymentMode === mode.value && styles.chipTextActive]}>{mode.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
 
       {loading ? (
@@ -313,7 +361,7 @@ export default function TransactionReportScreen({ society, onBack }) {
           ) : null}
 
           {transactions.length === 0 ? (
-            <Text style={styles.empty}>No transactions recorded for {monthLabel(monthDate)}.</Text>
+            <Text style={styles.empty}>No transactions recorded for {rangeLabel(fromDate, toDate)}.</Text>
           ) : (
             // Same column order as the PDF export - Txn Date, UTR/Ref No.,
             // Mode, Cr/Dr, Amount, Description - wrapped in its own
@@ -417,41 +465,63 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     paddingTop: 4,
   },
-  monthRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+  filterCard: {
     backgroundColor: '#fff',
     borderRadius: 10,
-    paddingVertical: 12,
+    padding: 16,
     marginBottom: 16,
     shadowColor: '#000',
     shadowOpacity: 0.05,
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
   },
-  monthArrow: {
-    paddingHorizontal: 20,
+  dateRow: {
+    flexDirection: 'row',
+    gap: 12,
   },
-  monthArrowText: {
-    fontSize: 16,
-    color: '#1a73e8',
+  dateField: {
+    flex: 1,
+  },
+  filterLabel: {
+    fontSize: 12,
     fontWeight: '700',
+    color: '#6e6e73',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    marginBottom: 6,
   },
-  monthLabelBox: {
-    alignItems: 'center',
-    minWidth: 160,
-  },
-  monthLabelText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1c1c1e',
+  paymentModeLabel: {
+    marginTop: 14,
   },
   monthResetLink: {
     fontSize: 12,
     color: '#1a73e8',
     fontWeight: '600',
-    marginTop: 4,
+    marginTop: 8,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  chip: {
+    borderWidth: 1,
+    borderColor: '#d0d0d0',
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  chipActive: {
+    backgroundColor: '#e8f0fe',
+    borderColor: '#1a73e8',
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6e6e73',
+  },
+  chipTextActive: {
+    color: '#1a73e8',
   },
   summaryCard: {
     flexDirection: 'row',

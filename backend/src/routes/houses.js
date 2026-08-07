@@ -37,6 +37,34 @@ async function requireActiveOwnerOfHouse(supabase, userId, houseId) {
   return (await getOwnActiveRelationshipOnHouse(supabase, userId, houseId)) === 'Owner';
 }
 
+// Priority for "what should this ONE billing period's receipt currently
+// show" when it has more than one payment attempt against it (a rejected
+// submission followed by a successful resubmission, or a still-pending one
+// sitting alongside an older rejected attempt) - a Verified payment (money
+// actually collected) always wins, then a still-in-review Submitted one,
+// then a Rejected attempt, so there is always exactly one truth per period.
+// Shared by GET /:houseId/billing-periods' latestPaymentStatus flag and
+// GET /:houseId/billing-periods/:periodId/receipt below - both need the
+// exact same "which attempt matters" answer, just at different levels of
+// detail.
+const PAYMENT_STATUS_PRIORITY = { Verified: 3, Submitted: 2, Rejected: 1 };
+
+function pickPrimaryAllocation(allocationRows) {
+  const ranked = (allocationRows || [])
+    .filter((row) => PAYMENT_STATUS_PRIORITY[row.transactions?.processing_status])
+    .sort((a, b) => PAYMENT_STATUS_PRIORITY[b.transactions.processing_status] - PAYMENT_STATUS_PRIORITY[a.transactions.processing_status]);
+  if (ranked.length === 0) return null;
+
+  const topStatus = ranked[0].transactions.processing_status;
+  // Submitted transactions have no verified_at yet, so ordering by
+  // created_at is the only option there; Verified/Rejected both always have
+  // verified_at set by the time they reach either of those states.
+  const dateField = topStatus === 'Submitted' ? 'created_at' : 'verified_at';
+  return ranked
+    .filter((row) => row.transactions.processing_status === topStatus)
+    .sort((a, b) => new Date(b.transactions[dateField] || b.transactions.created_at) - new Date(a.transactions[dateField] || a.transactions.created_at))[0];
+}
+
 // GET /listings?society_id= - any Active member of that society (no
 // Admin/Committee/resident-of-that-house restriction - this is a
 // same-society-wide noticeboard, a deliberately wider trust boundary than
@@ -688,14 +716,164 @@ router.get('/:houseId/billing-periods', authenticate, async (req, res) => {
     pendingPeriodIds = new Set((pendingAllocations || []).map((allocation) => allocation.billing_period_id));
   }
 
+  // latestPaymentStatus - purely additive, for the new "View Receipt" link
+  // on this same screen (see MaintenanceReceiptScreen): 'Verified' /
+  // 'Submitted' / 'Rejected' per PAYMENT_STATUS_PRIORITY above, or null if
+  // this period has never had a payment attempt against it at all. A
+  // separate query from pendingPeriodIds above (not derived from it)
+  // deliberately, so hasPendingSubmission's own already-tested behavior is
+  // never touched by this addition.
+  let latestPaymentStatusByPeriodId = new Map();
+  if (periodIds.length > 0) {
+    const { data: allAllocations, error: allAllocationsError } = await supabase
+      .from('transaction_allocations')
+      .select('billing_period_id, transactions!inner(processing_status, verified_at, created_at)')
+      .in('billing_period_id', periodIds);
+
+    if (allAllocationsError) {
+      return res.status(500).json({ error: allAllocationsError.message });
+    }
+
+    const rowsByPeriodId = new Map();
+    for (const row of allAllocations || []) {
+      const list = rowsByPeriodId.get(row.billing_period_id) || [];
+      list.push(row);
+      rowsByPeriodId.set(row.billing_period_id, list);
+    }
+    for (const [billingPeriodId, rows] of rowsByPeriodId.entries()) {
+      const primary = pickPrimaryAllocation(rows);
+      if (primary) {
+        latestPaymentStatusByPeriodId.set(billingPeriodId, primary.transactions.processing_status);
+      }
+    }
+  }
+
   // Same as above: an empty array is the normal outcome for a resident with
   // no visible assignment to this house, not an error condition.
   res.json(
     billingPeriods.map((period) => ({
       ...period,
       hasPendingSubmission: pendingPeriodIds.has(period.id),
+      latestPaymentStatus: latestPaymentStatusByPeriodId.get(period.id) || null,
     }))
   );
+});
+
+// GET /:houseId/billing-periods/:periodId/receipt - the "View Receipt"
+// action on a single billing history row. A receipt is always for exactly
+// ONE billing period, even when the underlying payment was a bulk
+// transaction that also covered other periods (see
+// MaintenanceReceiptScreen's own comment on this) - so this resolves to a
+// single transaction_allocations row scoped to THIS period via
+// pickPrimaryAllocation above, never a list. Same visibility model as the
+// sibling routes above: RLS on transaction_allocations/transactions (the
+// "visible transactions" / co-assignee policy) decides what a resident can
+// see; this route only distinguishes "not found" from a real result. 404
+// (not an empty/blank receipt) if nothing has ever been submitted against
+// this period - there is nothing to show yet.
+router.get('/:houseId/billing-periods/:periodId/receipt', authenticate, async (req, res) => {
+  const { houseId, periodId } = req.params;
+  const supabase = req.supabase;
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, house_number, owner_name')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  const { data: period, error: periodError } = await supabase
+    .from('billing_periods')
+    .select('id, society_id, house_id, period_month, amount_due, status')
+    .eq('id', periodId)
+    .eq('house_id', houseId)
+    .maybeSingle();
+
+  if (periodError) {
+    return res.status(500).json({ error: periodError.message });
+  }
+  if (!period) {
+    return res.status(404).json({ error: 'Billing period not found for this house.' });
+  }
+
+  const { data: allocations, error: allocationsError } = await supabase
+    .from('transaction_allocations')
+    .select(
+      'amount_allocated, transactions!inner(id, payment_mode, utr_number, txn_date, processing_status, submitted_by, verified_by, verified_at, rejection_reason, created_at)'
+    )
+    .eq('billing_period_id', periodId);
+
+  if (allocationsError) {
+    return res.status(500).json({ error: allocationsError.message });
+  }
+
+  const primary = pickPrimaryAllocation(allocations || []);
+  if (!primary) {
+    return res.status(404).json({ error: 'No payment has been submitted for this billing period yet.' });
+  }
+
+  const transaction = primary.transactions;
+  const statusLabel =
+    transaction.processing_status === 'Verified'
+      ? 'Approved'
+      : transaction.processing_status === 'Submitted'
+      ? 'Pending Approval'
+      : 'Rejected';
+
+  const { data: society, error: societyError } = await supabase
+    .from('societies')
+    .select('name')
+    .eq('id', period.society_id)
+    .maybeSingle();
+
+  if (societyError) {
+    return res.status(500).json({ error: societyError.message });
+  }
+
+  // supabaseAdmin to resolve display names for whichever auth_user_ids are
+  // involved (the submitter, and the verifier once Approved) - same
+  // reasoning as GET /:houseId/profile's own use of supabaseAdmin: a plain
+  // resident's own req.supabase token only ever sees their OWN
+  // society_members row under RLS, never another member's (a housemate who
+  // actually submitted the payment, or the Admin who verified/rejected it).
+  const memberAuthUserIds = [...new Set([transaction.submitted_by, transaction.verified_by].filter(Boolean))];
+  const { data: members, error: membersError } =
+    memberAuthUserIds.length > 0
+      ? await supabaseAdmin
+          .from('society_members')
+          .select('auth_user_id, name, phone_number')
+          .eq('society_id', period.society_id)
+          .in('auth_user_id', memberAuthUserIds)
+      : { data: [], error: null };
+
+  if (membersError) {
+    return res.status(500).json({ error: membersError.message });
+  }
+
+  const memberByAuthUserId = new Map((members || []).map((m) => [m.auth_user_id, m]));
+  const submitter = memberByAuthUserId.get(transaction.submitted_by);
+  const verifier = transaction.verified_by ? memberByAuthUserId.get(transaction.verified_by) : null;
+
+  res.json({
+    status: statusLabel,
+    rejectionReason: transaction.processing_status === 'Rejected' ? transaction.rejection_reason || null : null,
+    paymentMode: transaction.payment_mode,
+    refNo: transaction.utr_number || null,
+    residentName: submitter?.name || house.owner_name || 'Resident',
+    residentMobile: submitter?.phone_number || null,
+    houseNumber: house.house_number,
+    societyName: society?.name || '',
+    periodMonth: period.period_month,
+    amount: primary.amount_allocated,
+    date: transaction.txn_date || transaction.verified_at || transaction.created_at,
+    receivedBy: transaction.processing_status === 'Verified' ? verifier?.name || null : null,
+  });
 });
 
 // Admin-only: directly creates the next `months` sequential billing

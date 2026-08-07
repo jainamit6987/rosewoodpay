@@ -20,6 +20,20 @@ const CATEGORIES = [
   { value: 'Other', label: 'Other' },
 ];
 
+// Only "Other" can actually choose its direction (Cr/Dr) - Salary and
+// UtilityBill are always the society paying someone out (Dr), enforced
+// server-side by chk_direction_matches_type (see
+// 20260807000000_add_direction_and_month_end_closing.sql). Other is the
+// one category that can genuinely go either way: a misc payment the
+// society made (Dr, e.g. a donation given) or a misc receipt outside
+// Maintenance/WaterCharge (Cr, e.g. a refund or a bank interest credit) -
+// added for the Month-End Closing report's Income side, which needed a way
+// to represent that.
+const DIRECTIONS = [
+  { value: 'Dr', label: 'Expense (Money Out)' },
+  { value: 'Cr', label: 'Income (Money In)' },
+];
+
 // Kept in sync with the chk_payment_mode CHECK constraint, extended in
 // 20260802000000_extend_expense_payment_modes_and_description.sql. Each
 // mode's referenceLabel is what the "reference number" field is actually
@@ -68,6 +82,7 @@ function toDateOnly(date) {
 export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
   const { accessToken } = useAuth();
   const [category, setCategory] = useState('Other');
+  const [direction, setDirection] = useState('Dr');
   const [description, setDescription] = useState('');
   const [txnDate, setTxnDate] = useState(() => new Date());
   const [amount, setAmount] = useState('');
@@ -80,9 +95,20 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
 
   const selectedMode = PAYMENT_MODES.find((mode) => mode.value === paymentMode);
   const referenceRequired = !!selectedMode?.referenceLabel;
+  const isOtherCategory = category === 'Other';
+  const isIncome = isOtherCategory && direction === 'Cr';
+  const paidToLabel = isIncome ? 'Received From' : 'Paid To';
+
+  const handleCategoryChange = (value) => {
+    setCategory(value);
+    if (value !== 'Other') {
+      setDirection('Dr');
+    }
+  };
 
   const resetForm = () => {
     setCategory('Other');
+    setDirection('Dr');
     setDescription('');
     setTxnDate(new Date());
     setAmount('');
@@ -106,7 +132,7 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
       return;
     }
     if (!paidTo.trim()) {
-      setError('Enter who (or what) this payment was made to.');
+      setError(isIncome ? 'Enter who (or what) this money came from.' : 'Enter who (or what) this payment was made to.');
       return;
     }
     if (referenceRequired && !referenceNumber.trim()) {
@@ -119,6 +145,7 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
       const response = await apiPost('/transactions', accessToken, {
         society_id: societyId,
         transaction_type: category,
+        ...(isOtherCategory ? { direction } : {}),
         description: description.trim(),
         txn_date: toDateOnly(txnDate),
         amount: parsedAmount,
@@ -138,11 +165,13 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
   };
 
   if (result) {
+    const resultIsIncome = result.direction === 'Cr';
     return (
       <View style={styles.centered}>
-        <Text style={styles.successTitle}>Expense recorded</Text>
+        <Text style={styles.successTitle}>{resultIsIncome ? 'Income recorded' : 'Expense recorded'}</Text>
         <Text style={styles.subtitle}>
-          {formatMoney(result.amount)} paid to {result.payee_name} has been recorded and marked Verified.
+          {formatMoney(result.amount)} {resultIsIncome ? 'received from' : 'paid to'} {result.payee_name} has been
+          recorded and marked Verified.
         </Text>
         <TouchableOpacity style={styles.button} onPress={resetForm}>
           <Text style={styles.buttonText}>Record another</Text>
@@ -169,13 +198,35 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
             <TouchableOpacity
               key={cat.value}
               style={[styles.chip, category === cat.value && styles.chipActive]}
-              onPress={() => setCategory(cat.value)}
+              onPress={() => handleCategoryChange(cat.value)}
               disabled={submitting}
             >
               <Text style={[styles.chipText, category === cat.value && styles.chipTextActive]}>{cat.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
+
+        {isOtherCategory ? (
+          <>
+            <Text style={styles.label}>Direction</Text>
+            <View style={styles.chipRow}>
+              {DIRECTIONS.map((dir) => (
+                <TouchableOpacity
+                  key={dir.value}
+                  style={[styles.chip, direction === dir.value && styles.chipActive]}
+                  onPress={() => setDirection(dir.value)}
+                  disabled={submitting}
+                >
+                  <Text style={[styles.chipText, direction === dir.value && styles.chipTextActive]}>{dir.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.helper}>
+              Most "Other" entries are expenses. Switch to Income only for money the society received outside
+              Maintenance/Water Charges - e.g. a refund or bank interest credit.
+            </Text>
+          </>
+        ) : null}
 
         <Text style={styles.label}>Description</Text>
         <TextInput
@@ -232,10 +283,10 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
           <Text style={styles.helper}>Cash has no reference number to record.</Text>
         )}
 
-        <Text style={styles.label}>Paid To</Text>
+        <Text style={styles.label}>{paidToLabel}</Text>
         <TextInput
           style={styles.input}
-          placeholder="e.g. XYZ Security Agency"
+          placeholder={isIncome ? 'e.g. HDFC Bank (interest credit)' : 'e.g. XYZ Security Agency'}
           value={paidTo}
           onChangeText={setPaidTo}
           editable={!submitting}
@@ -248,7 +299,11 @@ export default function RecordExpenseScreen({ societyId, onDone, onCancel }) {
           onPress={handleSubmit}
           disabled={submitting}
         >
-          {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Record Expense</Text>}
+          {submitting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>{isIncome ? 'Record Income' : 'Record Expense'}</Text>
+          )}
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.cancelButton} onPress={onCancel} disabled={submitting}>

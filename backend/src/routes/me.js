@@ -16,7 +16,7 @@ router.get('/', authenticate, async (req, res) => {
   // endpoint *should* return.
   const { data: memberships, error: membershipError } = await supabase
     .from('society_members')
-    .select('id, society_id, is_admin, is_committee_member, status, phone_number, societies(id, name, upi_vpa, upi_payee_name)')
+    .select('id, society_id, name, is_admin, is_committee_member, status, phone_number, societies(id, name, upi_vpa, upi_payee_name)')
     .eq('auth_user_id', req.user.id);
 
   if (membershipError) {
@@ -31,6 +31,7 @@ router.get('/', authenticate, async (req, res) => {
   for (const membership of memberships) {
     const entry = {
       society: membership.societies,
+      name: membership.name,
       isAdmin: membership.is_admin,
       isCommitteeMember: membership.is_committee_member,
       status: membership.status,

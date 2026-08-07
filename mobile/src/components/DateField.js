@@ -15,7 +15,7 @@ function formatDisplay(date) {
 // platform's own native modal/dialog on both iOS and Android and
 // self-dismisses on pick or cancel, so no extra Modal/Done-button
 // wrapper is needed here.
-export default function DateField({ value, onChange, maximumDate, disabled }) {
+export default function DateField({ value, onChange, minimumDate, maximumDate, disabled }) {
   const [showPicker, setShowPicker] = useState(false);
 
   return (
@@ -32,6 +32,7 @@ export default function DateField({ value, onChange, maximumDate, disabled }) {
           value={value}
           mode="date"
           display="default"
+          minimumDate={minimumDate}
           maximumDate={maximumDate}
           onChange={(event, selectedDate) => {
             setShowPicker(false);

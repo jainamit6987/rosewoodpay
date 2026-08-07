@@ -47,6 +47,24 @@ async function requireActiveAdmin(supabase, userId, societyId) {
   return !!data;
 }
 
+// Same reasoning as requireActiveAdmin above, widened to either capability -
+// same shape as society.js's own requireActiveAdminOrCommittee, for the one
+// read-only route below (GET /:id) that Committee members may also view,
+// matching the "Committee can view, only Admin can act" split already
+// established there and on GET /'s own listing above.
+async function requireActiveAdminOrCommittee(supabase, userId, societyId) {
+  const { data, error } = await supabase
+    .from('society_members')
+    .select('id')
+    .eq('society_id', societyId)
+    .eq('auth_user_id', userId)
+    .eq('status', 'Active')
+    .or('is_admin.eq.true,is_committee_member.eq.true')
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return !!data;
+}
+
 // GET /members - Admin or Committee (of at least one Active membership)
 // lists every member across every society the caller administers or sits
 // on the committee of - including Suspended/Invited ones, since an Admin
@@ -233,14 +251,14 @@ router.get('/:id', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'Member not found or not accessible.' });
   }
 
-  let callerIsAdmin;
+  let callerAllowed;
   try {
-    callerIsAdmin = await requireActiveAdmin(supabase, req.user.id, member.society_id);
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, member.society_id);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
-  if (!callerIsAdmin) {
-    return res.status(403).json({ error: "Only an Admin of this member's society can view them." });
+  if (!callerAllowed) {
+    return res.status(403).json({ error: "Only an Admin or Committee member of this member's society can view them." });
   }
 
   const { data: userData, error: userError } = await supabaseAdmin.auth.admin.getUserById(member.auth_user_id);

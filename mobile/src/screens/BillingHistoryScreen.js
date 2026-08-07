@@ -15,26 +15,25 @@ function formatMonth(periodMonth) {
   return new Date(periodMonth).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
 
-function formatMoney(amount) {
-  return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
-}
-
 // Kept in sync with the chk_billing_status CHECK constraint (Open / Closed /
 // Waived) - anything unrecognized falls back to a neutral gray badge rather
-// than crashing on an unexpected value. "Pending Approval" is not a real
-// status value - a period stays 'Open' in the database right up until a
-// payment against it is actually Verified (see GET /houses/:houseId/billing
-// -periods' hasPendingSubmission flag), so an Open period that already has
-// a Submitted payment sitting in the review queue is relabeled here purely
-// for display, using its own badge color, without pretending it's some
-// fourth database status.
+// than crashing on an unexpected value. "Pending Approval" and "Rejected"
+// are not real status values - a period stays 'Open' in the database right
+// up until a payment against it is actually Verified (see GET
+// /houses/:houseId/billing-periods' hasPendingSubmission/latestPaymentStatus
+// flags), so an Open period with a Submitted payment still in the review
+// queue, or one whose only payment attempt so far was Rejected, is
+// relabeled here purely for display, each with its own badge color, without
+// pretending either is some new database status.
 function displayStatus(period) {
   if (period.status === 'Open' && period.hasPendingSubmission) return 'Pending Approval';
+  if (period.status === 'Open' && period.latestPaymentStatus === 'Rejected') return 'Rejected';
   return period.status;
 }
 
 function statusBadgeStyle(period) {
   if (period.status === 'Open' && period.hasPendingSubmission) return styles.badgePending;
+  if (period.status === 'Open' && period.latestPaymentStatus === 'Rejected') return styles.badgeRejected;
   if (period.status === 'Open') return styles.badgeOpen;
   if (period.status === 'Closed') return styles.badgeClosed;
   if (period.status === 'Waived') return styles.badgeWaived;
@@ -43,10 +42,24 @@ function statusBadgeStyle(period) {
 
 function statusTextStyle(period) {
   if (period.status === 'Open' && period.hasPendingSubmission) return styles.badgeTextPending;
+  if (period.status === 'Open' && period.latestPaymentStatus === 'Rejected') return styles.badgeTextRejected;
   if (period.status === 'Open') return styles.badgeTextOpen;
   if (period.status === 'Closed') return styles.badgeTextClosed;
   if (period.status === 'Waived') return styles.badgeTextWaived;
   return styles.badgeTextUnknown;
+}
+
+// Label for the "View Receipt" link - shown for any period that has ever
+// had a payment attempt against it (latestPaymentStatus non-null), covering
+// all three receipt states from the Maintenance Receipt mockup: an Approved
+// receipt for a Verified payment, a Pending Approval one for a Submitted
+// payment still in review, and a Rejected one (with its reason) for a
+// rejected attempt - never shown for a period with no payment activity at
+// all, since GET .../receipt would just 404 for it. The status itself is
+// never repeated here - the badge next to the period already shows it.
+function receiptLinkLabel(period) {
+  if (!period.latestPaymentStatus) return null;
+  return 'View Receipt';
 }
 
 // Full month-by-month history for a single house - every period regardless
@@ -54,7 +67,7 @@ function statusTextStyle(period) {
 // screen's whole purpose is "what do I owe right now"). This is the
 // "Live Receipt view" from the workflow doc: proof a given month was
 // actually paid/closed, not just what's currently outstanding.
-export default function BillingHistoryScreen({ house, onBack }) {
+export default function BillingHistoryScreen({ house, onBack, onViewReceipt }) {
   const { accessToken } = useAuth();
   const [periods, setPeriods] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -112,17 +125,24 @@ export default function BillingHistoryScreen({ house, onBack }) {
         <Text style={styles.empty}>No billing periods recorded yet for this house.</Text>
       ) : (
         <View style={styles.card}>
-          {periods.map((period) => (
-            <View key={period.id} style={styles.periodRow}>
-              <View style={styles.periodRowLeft}>
-                <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
-                <View style={[styles.badge, statusBadgeStyle(period)]}>
-                  <Text style={[styles.badgeText, statusTextStyle(period)]}>{displayStatus(period)}</Text>
+          {periods.map((period) => {
+            const linkLabel = receiptLinkLabel(period);
+            return (
+              <View key={period.id} style={styles.periodRow}>
+                <View style={styles.periodRowTop}>
+                  <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
+                  <View style={[styles.badge, statusBadgeStyle(period)]}>
+                    <Text style={[styles.badgeText, statusTextStyle(period)]}>{displayStatus(period)}</Text>
+                  </View>
                 </View>
+                {linkLabel && onViewReceipt ? (
+                  <TouchableOpacity onPress={() => onViewReceipt(period)} style={styles.viewReceiptLink}>
+                    <Text style={styles.viewReceiptLinkText}>{linkLabel} &rsaquo;</Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
-              <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
-            </View>
-          ))}
+            );
+          })}
         </View>
       )}
     </ScrollView>
@@ -179,25 +199,27 @@ const styles = StyleSheet.create({
     borderColor: '#e6e6e6',
   },
   periodRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
+    gap: 4,
   },
-  periodRowLeft: {
+  periodRowTop: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 10,
+  },
+  viewReceiptLink: {
+    alignSelf: 'flex-end',
+  },
+  viewReceiptLinkText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#1a73e8',
   },
   periodMonth: {
     fontSize: 14,
     color: '#333',
-  },
-  periodAmount: {
-    fontSize: 14,
-    fontWeight: '600',
   },
   badge: {
     paddingHorizontal: 8,
@@ -231,6 +253,12 @@ const styles = StyleSheet.create({
   },
   badgeTextWaived: {
     color: '#6a1fc7',
+  },
+  badgeRejected: {
+    backgroundColor: '#fdecea',
+  },
+  badgeTextRejected: {
+    color: '#c0392b',
   },
   badgeUnknown: {
     backgroundColor: '#eee',

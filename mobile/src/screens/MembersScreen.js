@@ -46,7 +46,7 @@ function roleLabel(member) {
 // screen re-fetches its own live data" shape as HousesScreen -> Dashboard.
 // "+ New Member" is the one write entry point here, leading to
 // CreateMemberScreen.
-export default function MembersScreen({ onBack, onSelectMember, onCreateMember }) {
+export default function MembersScreen({ isAdmin, onBack, onSelectMember, onCreateMember }) {
   const { accessToken } = useAuth();
   const [query, setQuery] = useState('');
   const [members, setMembers] = useState([]);
@@ -108,9 +108,16 @@ export default function MembersScreen({ onBack, onSelectMember, onCreateMember }
         </TouchableOpacity>
       ) : null}
 
-      <TouchableOpacity style={styles.createButton} onPress={onCreateMember}>
-        <Text style={styles.createButtonText}>+ New Member</Text>
-      </TouchableOpacity>
+      {/* Creating a member is Admin-only on the backend (see
+          routes/members.js's POST / requireActiveAdmin check) - the
+          button is hidden entirely for a Committee-only caller, rather
+          than shown disabled, since search below stays their one real
+          reason to be on this screen at all. */}
+      {isAdmin ? (
+        <TouchableOpacity style={styles.createButton} onPress={onCreateMember}>
+          <Text style={styles.createButtonText}>+ New Member</Text>
+        </TouchableOpacity>
+      ) : null}
 
       <TextInput
         style={styles.searchInput}

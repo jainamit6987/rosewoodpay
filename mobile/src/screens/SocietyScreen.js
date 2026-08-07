@@ -11,26 +11,6 @@ import {
 import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
-function formatDate(value) {
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-// Kept in sync with the chk_societies_status CHECK constraint (Active /
-// Inactive) - same "unrecognized falls back to a neutral gray badge" rule
-// as every other status badge in this codebase (BillingHistoryScreen,
-// MyTransactionsScreen).
-function statusBadgeStyle(status) {
-  if (status === 'Active') return styles.badgeActive;
-  if (status === 'Inactive') return styles.badgeInactive;
-  return styles.badgeUnknown;
-}
-
-function statusTextStyle(status) {
-  if (status === 'Active') return styles.badgeTextActive;
-  if (status === 'Inactive') return styles.badgeTextInactive;
-  return styles.badgeTextUnknown;
-}
-
 // GET /society (backend/src/routes/society.js) returns every society this
 // caller is an Active Admin/Committee member of, as an array - in practice
 // always exactly one for how this app is used today (one membership, one
@@ -38,7 +18,23 @@ function statusTextStyle(status) {
 // multi-society Admin/Committee member is handled for free, matching how
 // GET /transactions/mine's list rendering never assumed "exactly one house"
 // either.
-export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTransactionReport }) {
+//
+// Reports/Actions only - the read-only society facts (UPI VPA, timezone,
+// registered date, ...) that used to sit in a card directly on this screen
+// now live on SocietyProfileScreen instead, reached by tapping the society
+// name on AdminHomeScreen's own header (see that screen's own comment).
+// The society name is still shown here as a plain label, just to identify
+// whose Reports/Actions these are for a future multi-society caller - it is
+// not itself a link back to the profile screen, since this screen is
+// already one level below AdminHomeScreen and does not need a second path
+// to the same place.
+export default function SocietyScreen({
+  isAdmin,
+  onBack,
+  onViewPendencyReport,
+  onViewTransactionReport,
+  onViewMonthEndClosing,
+}) {
   const { accessToken } = useAuth();
   const [societies, setSocieties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -115,7 +111,7 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
     >
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Society settings</Text>
+          <Text style={styles.title}>Society Reports & Actions</Text>
           <Text style={styles.subtitle}>
             {societies.length} {societies.length === 1 ? 'society' : 'societies'}
           </Text>
@@ -145,30 +141,9 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
         const generate = generateState[society.id] || {};
         return (
           <View key={society.id} style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.societyName}>{society.name}</Text>
-              <View style={[styles.badge, statusBadgeStyle(society.status)]}>
-                <Text style={[styles.badgeText, statusTextStyle(society.status)]}>{society.status}</Text>
-              </View>
-            </View>
+            <Text style={styles.societyName}>{society.name}</Text>
 
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>UPI VPA</Text>
-              <Text style={styles.detailValue}>{society.upi_vpa}</Text>
-            </View>
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>UPI payee name</Text>
-              <Text style={styles.detailValue}>{society.upi_payee_name}</Text>
-            </View>
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>Timezone</Text>
-              <Text style={styles.detailValue}>{society.timezone}</Text>
-            </View>
-            <View style={[styles.detailRow, styles.detailRowLast]}>
-              <Text style={styles.detailLabel}>Registered on</Text>
-              <Text style={styles.detailValue}>{formatDate(society.created_at)}</Text>
-            </View>
-
+            <Text style={styles.sectionHeader}>Reports</Text>
             <View style={styles.reportGrid}>
               {onViewPendencyReport ? (
                 <TouchableOpacity style={styles.reportTile} onPress={() => onViewPendencyReport(society)}>
@@ -182,32 +157,49 @@ export default function SocietyScreen({ onBack, onViewPendencyReport, onViewTran
                   <Text style={styles.reportTileSummary}>Society ledger by month →</Text>
                 </TouchableOpacity>
               ) : null}
+              {onViewMonthEndClosing ? (
+                <TouchableOpacity style={styles.reportTile} onPress={() => onViewMonthEndClosing(society)}>
+                  <Text style={styles.reportTileTitle}>Month End Report</Text>
+                  <Text style={styles.reportTileSummary}>Opening/closing balance →</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
+            <Text style={styles.sectionHeader}>Actions</Text>
+            <View style={styles.reportGrid}>
               {/* S.No 16: bulk-create next month's billing period for every
                   Active house in this society in one call. Styled as a
-                  filled (not gray) tile - the two above are navigation,
-                  this one is a write action - and turns green once it has
+                  filled (not gray) tile - unlike the Reports tiles above,
+                  this is a write action - and turns green once it has
                   already run once for this screen session, to make an
                   accidental double-run (which is otherwise harmless -
                   already-existing months are just skipped) visually
                   unlikely rather than relying on the backend's own
                   idempotency alone. Not gated on either onView* prop above -
                   this tile is self-contained (calls apiPost directly), not a
-                  navigation handoff to App.js. */}
+                  navigation handoff to App.js. Admin-only (see
+                  routes/society.js's own requireActiveAdmin check on this
+                  endpoint) - grayed out for a Committee-only caller rather
+                  than left live to just bounce a 403 back. */}
               <TouchableOpacity
-                style={[styles.actionTile, generate.result && styles.actionTileDone]}
-                onPress={() => startGenerateConfirm(society.id)}
-                disabled={generate.confirming || generate.busy}
+                style={[
+                  styles.actionTile,
+                  generate.result && styles.actionTileDone,
+                  !isAdmin && styles.actionTileDisabled,
+                ]}
+                onPress={isAdmin ? () => startGenerateConfirm(society.id) : undefined}
+                disabled={!isAdmin || generate.confirming || generate.busy}
               >
-                <Text style={styles.actionTileTitle}>
+                <Text style={[styles.actionTileTitle, !isAdmin && styles.actionTileTitleDisabled]}>
                   {generate.result ? 'Generated ✓' : "Generate Next Month's Billing"}
                 </Text>
-                <Text style={styles.actionTileSummary}>
-                  {generate.result ? 'Run again if needed' : 'Every house, one month ahead'}
+                <Text style={[styles.actionTileSummary, !isAdmin && styles.actionTileSummaryDisabled]}>
+                  {!isAdmin ? 'Admin only' : generate.result ? 'Run again if needed' : 'Every house, one month ahead'}
                 </Text>
               </TouchableOpacity>
             </View>
 
-            {generate.confirming ? (
+            {isAdmin && generate.confirming ? (
               <View style={styles.confirmBox}>
                 <Text style={styles.confirmText}>
                   This creates next month's billing period for every Active house in {society.name} that doesn't
@@ -324,41 +316,24 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
   },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
   societyName: {
     fontSize: 18,
     fontWeight: '700',
     color: '#1c1c1e',
   },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  detailRowLast: {
-    borderBottomWidth: 0,
-  },
-  detailLabel: {
-    fontSize: 13,
-    color: '#6e6e73',
-  },
-  detailValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#1c1c1e',
+  sectionHeader: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#8a8a8e',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginTop: 16,
+    marginBottom: 8,
   },
   reportGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 12,
-    marginTop: 14,
   },
   reportTile: {
     flexBasis: '47%',
@@ -402,6 +377,15 @@ const styles = StyleSheet.create({
     color: '#e8f0fe',
     fontWeight: '600',
     marginTop: 4,
+  },
+  actionTileDisabled: {
+    backgroundColor: '#f5f5f7',
+  },
+  actionTileTitleDisabled: {
+    color: '#a8a8ad',
+  },
+  actionTileSummaryDisabled: {
+    color: '#a8a8ad',
   },
   confirmBox: {
     backgroundColor: '#f5f5f7',
@@ -457,32 +441,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6e6e73',
     marginTop: 4,
-  },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  badgeActive: {
-    backgroundColor: '#e6f4ea',
-  },
-  badgeTextActive: {
-    color: '#2e7d32',
-  },
-  badgeInactive: {
-    backgroundColor: '#fdecea',
-  },
-  badgeTextInactive: {
-    color: '#c0392b',
-  },
-  badgeUnknown: {
-    backgroundColor: '#eee',
-  },
-  badgeTextUnknown: {
-    color: '#666',
   },
 });

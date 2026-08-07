@@ -3,26 +3,49 @@ import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, Toucha
 import { apiGet } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
+// First letter of each of the first two words (e.g. "Rosewood Century" ->
+// "RC"), or the first two letters of a single-word name (e.g. "Sunview" ->
+// "SU") - same short-identifier role the house number itself already plays
+// inside ResidentHomeScreen's own avatar circle, just derived rather than
+// a real field, since a society has no equivalent short code of its own.
+function societyInitials(name) {
+  const words = (name || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '?';
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
+}
+
 // The Admin/Committee landing screen - a grouped grid of tiles, one per
 // feature, rather than one screen (previously AdminReviewScreen) collecting
 // an ever-growing stack of one-off links to every other screen. Sections
 // mirror app-workflows.csv's own natural groupings (Payments / Members &
-// Houses / Billing / Reports / Settings). Deliberately only ever shows a
-// tile for a screen that actually exists yet - no grayed-out "coming soon"
-// placeholders - so this grid grows by exactly one tile each time a new
-// screen ships, and never needs a redesign as more get added. Every spoke
-// screen reached from here (AdminReviewScreen, SocietyScreen, HousesScreen,
-// ...) shows a single "← Back to dashboard" link back to here, and none of
-// them carry their own Sign out link anymore - same "only the true home
-// screen for this mode has Sign out" convention DuesScreen already
-// established on the resident side (BillingHistoryScreen/MyTransactionsScreen
-// don't have one either).
+// Houses / Billing / Reports / Society Reports & Actions). Deliberately
+// only ever shows a tile for a screen that actually exists yet - no
+// grayed-out "coming soon" placeholders - so this grid grows by exactly one
+// tile each time a new screen ships, and never needs a redesign as more get
+// added. Every spoke screen reached from here (AdminReviewScreen,
+// SocietyScreen, HousesScreen, ...) shows a single "← Back to dashboard"
+// link back to here, and none of them carry their own Sign out link
+// anymore - same "only the true home screen for this mode has Sign out"
+// convention DuesScreen already established on the resident side
+// (BillingHistoryScreen/MyTransactionsScreen don't have one either).
+//
+// The header's circular avatar (society initials, tappable) opens
+// SocietyProfileScreen (onViewSocietyProfile) - the exact same tappable
+// circular-avatar-plus-chevron-badge pattern ResidentHomeScreen's own
+// house-number avatar already established for HouseProfileScreen, just
+// with derived initials standing in for a house's own real house_number.
+// Society details (UPI VPA, timezone, registered date, ...) used to live in
+// a card directly on SocietyScreen; that screen is now Reports/Actions
+// only, so this is their one new home.
 export default function AdminHomeScreen({
+  isAdmin,
   onReviewPayments,
   onRecordExpense,
   onViewHouses,
   onViewMembers,
   onViewSociety,
+  onViewSocietyProfile,
   onChangePassword,
   onSwitchToResident,
   onLogout,
@@ -83,7 +106,22 @@ export default function AdminHomeScreen({
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
     >
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
+        <TouchableOpacity
+          style={styles.avatarCircle}
+          onPress={onViewSocietyProfile}
+          disabled={!onViewSocietyProfile}
+          accessibilityLabel="View society profile"
+        >
+          <Text style={styles.avatarText} numberOfLines={1}>
+            {societyInitials(societyName)}
+          </Text>
+          {onViewSocietyProfile ? (
+            <View style={styles.avatarBadge}>
+              <Text style={styles.avatarBadgeText}>{'\u203a'}</Text>
+            </View>
+          ) : null}
+        </TouchableOpacity>
+        <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={styles.title}>{societyName || 'Admin dashboard'}</Text>
           <Text style={styles.subtitle}>Admin dashboard</Text>
         </View>
@@ -111,11 +149,24 @@ export default function AdminHomeScreen({
       <View style={styles.grid}>
         <TouchableOpacity style={styles.tile} onPress={onReviewPayments}>
           <Text style={styles.tileTitle}>Review Payments</Text>
-          <Text style={styles.tileSummary}>{pendingCount} pending</Text>
+          <Text style={styles.tileSummary}>
+            {pendingCount} pending{isAdmin ? '' : ' \u00b7 view only'}
+          </Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.tile} onPress={onRecordExpense}>
-          <Text style={styles.tileTitle}>Record Expense</Text>
-          <Text style={styles.tileSummary}>Salary, bills & more</Text>
+        {/* Committee members can view every other tile on this dashboard,
+            but recording an expense is Admin-only on the backend (see
+            routes/transactions.js's EXPENSE_TYPES branch) - grayed out and
+            unpressable here rather than left live and just bouncing a 403
+            back once tapped. */}
+        <TouchableOpacity
+          style={[styles.tile, !isAdmin && styles.tileDisabled]}
+          onPress={isAdmin ? onRecordExpense : undefined}
+          disabled={!isAdmin}
+        >
+          <Text style={[styles.tileTitle, !isAdmin && styles.tileTitleDisabled]}>Record Expense</Text>
+          <Text style={[styles.tileSummary, !isAdmin && styles.tileSummaryDisabled]}>
+            {isAdmin ? 'Salary, bills & more' : 'Admin only'}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -129,14 +180,15 @@ export default function AdminHomeScreen({
         </TouchableOpacity>
         <TouchableOpacity style={styles.tile} onPress={onViewMembers}>
           <Text style={styles.tileTitle}>Members</Text>
-          <Text style={styles.tileSummary}>View, add & suspend</Text>
+          <Text style={styles.tileSummary}>{isAdmin ? 'View, add & suspend' : 'View only'}</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.sectionHeader}>Settings</Text>
+      <Text style={styles.sectionHeader}>Society Reports/Actions</Text>
       <View style={styles.grid}>
         <TouchableOpacity style={styles.tile} onPress={onViewSociety}>
-          <Text style={styles.tileTitle}>Society Settings</Text>
+          <Text style={styles.tileTitle}>Reports & Actions</Text>
+          <Text style={styles.tileSummary}>Ledger, dues & billing</Text>
         </TouchableOpacity>
         {onChangePassword ? (
           <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
@@ -166,8 +218,58 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     marginBottom: 8,
+  },
+  // Same avatar-circle-plus-overlapping-badge treatment as
+  // ResidentHomeScreen's own avatarCircle/avatarBadge - the shadow/ring
+  // read as a raised, pressable surface, and the badge's chevron confirms
+  // what tapping it does, before or after the disabled check below removes
+  // both entirely for a caller onViewSocietyProfile was never passed for.
+  avatarCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#1a73e8',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#1a73e8',
+    shadowOpacity: 0.45,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  avatarText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  avatarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: '#f5f5f7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 3,
+  },
+  avatarBadgeText: {
+    color: '#1a73e8',
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 12,
   },
   title: {
     fontSize: 22,
@@ -247,5 +349,15 @@ const styles = StyleSheet.create({
     color: '#1a73e8',
     fontWeight: '600',
     marginTop: 6,
+  },
+  tileDisabled: {
+    backgroundColor: '#f5f5f7',
+    shadowOpacity: 0,
+  },
+  tileTitleDisabled: {
+    color: '#a8a8ad',
+  },
+  tileSummaryDisabled: {
+    color: '#a8a8ad',
   },
 });

@@ -76,7 +76,15 @@ function currentPeriodLabel(currentPeriod) {
 // (assignments.js's last-Owner check on revoke, the Suspended-member
 // check on create) - this screen just surfaces whatever error those
 // return, it does not duplicate the rules client-side.
-export default function HouseDashboardScreen({ house, onViewTransactions, onViewHistory, onSubmitCashPayment, onSelectMember, onBack }) {
+export default function HouseDashboardScreen({
+  isAdmin,
+  house,
+  onViewTransactions,
+  onViewHistory,
+  onSubmitCashPayment,
+  onSelectMember,
+  onBack,
+}) {
   const { accessToken } = useAuth();
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -360,9 +368,18 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
       </View>
 
       {dashboard.currentDue > 0 ? (
-        <TouchableOpacity style={styles.cashButton} onPress={onSubmitCashPayment}>
-          <Text style={styles.cashButtonText}>Submit Cash Payment</Text>
-        </TouchableOpacity>
+        // Cash is Admin-only on the backend (see routes/transactions.js's
+        // CASH_MODE check) - a Committee member gets this button grayed
+        // out here rather than a 403 once they reach SubmitPaymentScreen.
+        isAdmin ? (
+          <TouchableOpacity style={styles.cashButton} onPress={onSubmitCashPayment}>
+            <Text style={styles.cashButtonText}>Submit Cash Payment</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={[styles.cashButton, styles.cashButtonDisabled]}>
+            <Text style={styles.cashButtonTextDisabled}>Submit Cash Payment - Admin only</Text>
+          </View>
+        )
       ) : (
         <Text style={styles.paidUp}>All caught up - no open dues.</Text>
       )}
@@ -371,13 +388,18 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
       <View style={styles.card}>
         <Text style={styles.advanceHint}>
           Create billing period(s) ahead of any payment, so this house can pay maintenance in advance.
+          {isAdmin ? '' : ' Admin only - Committee members can view existing periods but not create new ones.'}
         </Text>
 
+        {/* Admin-only on the backend (see routes/houses.js's POST
+            /:houseId/billing-periods) - the whole stepper+button is
+            disabled, not just the final Create tap, so a Committee member
+            cannot get partway through the flow before hitting a wall. */}
         <View style={styles.stepperRow}>
           <TouchableOpacity
             style={styles.stepperButton}
             onPress={() => stepAdvanceMonths(-1)}
-            disabled={advanceBusy}
+            disabled={!isAdmin || advanceBusy}
           >
             <Text style={styles.stepperButtonText}>−</Text>
           </TouchableOpacity>
@@ -387,12 +409,12 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
             onChangeText={setAdvanceMonthsInput}
             onBlur={() => setAdvanceMonthsInput(String(clampAdvanceMonths(advanceMonthsInput)))}
             keyboardType="number-pad"
-            editable={!advanceBusy}
+            editable={isAdmin && !advanceBusy}
           />
           <TouchableOpacity
             style={styles.stepperButton}
             onPress={() => stepAdvanceMonths(1)}
-            disabled={advanceBusy}
+            disabled={!isAdmin || advanceBusy}
           >
             <Text style={styles.stepperButtonText}>+</Text>
           </TouchableOpacity>
@@ -409,11 +431,13 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
         ) : null}
 
         <TouchableOpacity
-          style={[styles.addButton, advanceBusy && styles.addButtonDisabled]}
-          onPress={handleCreateAdvancePeriods}
-          disabled={advanceBusy}
+          style={[styles.addButton, (!isAdmin || advanceBusy) && styles.addButtonDisabled]}
+          onPress={isAdmin ? handleCreateAdvancePeriods : undefined}
+          disabled={!isAdmin || advanceBusy}
         >
-          <Text style={styles.addButtonText}>{advanceBusy ? 'Creating…' : 'Create Billing Period(s)'}</Text>
+          <Text style={styles.addButtonText}>
+            {!isAdmin ? 'Admin only' : advanceBusy ? 'Creating…' : 'Create Billing Period(s)'}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -422,6 +446,7 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
         <Text style={styles.advanceHint}>
           Record a Cash payment for extra water usage - pay-as-you-go, no fixed monthly rate. Recorded as
           already Verified immediately, no separate review step.
+          {isAdmin ? '' : ' Admin only - Committee members cannot record this on a resident\'s behalf.'}
         </Text>
 
         <Text style={styles.detailLabel}>Amount</Text>
@@ -432,7 +457,7 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
           placeholderTextColor="#999"
           value={waterAmount}
           onChangeText={setWaterAmount}
-          editable={!waterBusy}
+          editable={isAdmin && !waterBusy}
         />
 
         <Text style={styles.detailLabel}>Note (optional)</Text>
@@ -442,7 +467,7 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
           placeholderTextColor="#999"
           value={waterDescription}
           onChangeText={setWaterDescription}
-          editable={!waterBusy}
+          editable={isAdmin && !waterBusy}
         />
 
         {waterError ? <Text style={styles.rowError}>{waterError}</Text> : null}
@@ -454,19 +479,28 @@ export default function HouseDashboardScreen({ house, onViewTransactions, onView
         ) : null}
 
         <TouchableOpacity
-          style={[styles.addButton, waterBusy && styles.addButtonDisabled]}
-          onPress={handleRecordWaterCash}
-          disabled={waterBusy}
+          style={[styles.addButton, (!isAdmin || waterBusy) && styles.addButtonDisabled]}
+          onPress={isAdmin ? handleRecordWaterCash : undefined}
+          disabled={!isAdmin || waterBusy}
         >
-          <Text style={styles.addButtonText}>{waterBusy ? 'Recording…' : 'Record Cash Payment'}</Text>
+          <Text style={styles.addButtonText}>
+            {!isAdmin ? 'Admin only' : waterBusy ? 'Recording…' : 'Record Cash Payment'}
+          </Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.sectionHeaderRow}>
         <Text style={styles.sectionHeader}>Residents</Text>
-        <TouchableOpacity onPress={toggleEditResidents}>
-          <Text style={styles.editToggleText}>{editingResidents ? 'Done' : 'Edit'}</Text>
-        </TouchableOpacity>
+        {/* Adding/removing a resident is Admin-only on the backend (see
+            routes/assignments.js) - the Edit toggle itself is hidden for a
+            Committee member rather than shown and then blocking every
+            action inside it, since there would be nothing left they could
+            actually do once inside anyway. */}
+        {isAdmin ? (
+          <TouchableOpacity onPress={toggleEditResidents}>
+            <Text style={styles.editToggleText}>{editingResidents ? 'Done' : 'Edit'}</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {dashboard.residents.length === 0 ? (
@@ -732,6 +766,14 @@ const styles = StyleSheet.create({
   },
   cashButtonText: {
     color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  cashButtonDisabled: {
+    backgroundColor: '#e6e6e9',
+  },
+  cashButtonTextDisabled: {
+    color: '#8a8a8e',
     fontWeight: '600',
     fontSize: 15,
   },

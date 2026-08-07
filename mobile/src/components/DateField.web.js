@@ -25,11 +25,12 @@ function fromInputValue(value) {
   return new Date(year, month - 1, day);
 }
 
-export default function DateField({ value, onChange, maximumDate, disabled }) {
+export default function DateField({ value, onChange, minimumDate, maximumDate, disabled }) {
   return (
     <input
       type="date"
       value={toInputValue(value)}
+      min={minimumDate ? toInputValue(minimumDate) : undefined}
       max={maximumDate ? toInputValue(maximumDate) : undefined}
       disabled={disabled}
       onChange={(e) => {

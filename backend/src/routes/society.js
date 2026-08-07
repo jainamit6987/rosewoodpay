@@ -83,10 +83,170 @@ async function requireActiveAdminOrCommittee(supabase, userId, societyId) {
 // YYYY-MM, not a full date - the caller picks a month, not a day.
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 
+// Plain date-only string, used by the transaction report's own ?from=/?to=
+// filter below - deliberately not a full ISO timestamp, since the caller
+// is picking calendar days, not instants.
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 // Same pattern as routes/transactions.js's own UUID_PATTERN, duplicated
 // locally for the same no-shared-utils-module reason as the date helpers
 // above.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Same PAYMENT_MODES split as routes/transactions.js - "Bank"/"Online" is
+// every mode that eventually settles in the society's bank account
+// (UPI/NEFT_IMPS/Cheque); Cash is the one mode that never touches it. Used
+// by the Month-End Closing report below to split every Income/Expense
+// figure into its own Bank vs Cash ledger.
+const BANK_PAYMENT_MODES = ['UPI', 'NEFT_IMPS', 'Cheque'];
+
+// Same PAYMENT_MODES list as routes/transactions.js's own validation -
+// duplicated locally for the same no-shared-utils-module reason as the
+// date helpers above. Used to validate the transaction report's ?mode=
+// filter below.
+const PAYMENT_MODES = ['UPI', 'Cash', 'NEFT_IMPS', 'Cheque'];
+
+// One row per transaction_type in the Month-End Closing Income/Expense
+// grid, in fixed display order. appliesTo controls which side(s) of the
+// grid a type can ever have a non-zero figure on - Maintenance/WaterCharge
+// are always Cr (income-only), Salary/UtilityBill are always Dr
+// (expense-only), matching chk_direction_matches_type exactly. Other is the
+// one row that genuinely appears on both sides (see transactions.direction)
+// and is the only row with a description-grouped breakdown - discussed and
+// confirmed with the user while designing this report: transparency for a
+// report shared externally with every resident meant residents should be
+// able to see exactly what a miscellaneous "Other" figure is actually made
+// of, broken down by each exact-match transaction description.
+const MONTH_END_CLOSING_ROW_DEFS = [
+  { type: 'Maintenance', label: 'Maintenance', appliesTo: ['income'] },
+  { type: 'WaterCharge', label: 'Water Charges', appliesTo: ['income'] },
+  { type: 'UtilityBill', label: 'Utility Bills', appliesTo: ['expense'] },
+  { type: 'Salary', label: 'Salary', appliesTo: ['expense'] },
+  { type: 'Other', label: 'Other', appliesTo: ['income', 'expense'] },
+];
+
+// Paise-safe rounding for every derived Month-End Closing figure (sums of
+// NUMERIC columns can arrive as JS floats with tiny binary rounding error,
+// e.g. 0.1 + 0.2) - same underlying float concern as routes/transactions.js's
+// own isWholeMultiple, just applied as a display-rounding step here instead
+// of a whole-multiple check.
+function round2(amount) {
+  return Math.round(amount * 100) / 100;
+}
+
+// Builds the full Income/Expense grid (one row per MONTH_END_CLOSING_ROW_DEFS
+// entry, each split Online vs Cash and Income vs Expense), the Other row's
+// own description-grouped Income/Expense breakdowns ("if their description
+// matches exactly then group, else no" - confirmed with the user, so the
+// grouping key is the trimmed description string, nothing fuzzier), the
+// grid's Totals row, the combined Overall Total (Online + Cash, both
+// sides), and the Maintenance Online-vs-Cash collection breakup - from one
+// flat array of this month's Verified transactions. Shared identically by
+// GET (live preview) and POST (what actually gets saved) below, so the two
+// can never silently drift apart.
+function computeMonthEndClosingFigures(transactions) {
+  const rows = MONTH_END_CLOSING_ROW_DEFS.map((def) => ({
+    type: def.type,
+    label: def.label,
+    appliesTo: def.appliesTo,
+    income: { online: 0, cash: 0 },
+    expense: { online: 0, cash: 0 },
+  }));
+  const rowByType = new Map(rows.map((row) => [row.type, row]));
+
+  const otherIncomeGroups = new Map();
+  const otherExpenseGroups = new Map();
+
+  for (const txn of transactions) {
+    const row = rowByType.get(txn.transaction_type);
+    if (!row) continue; // defensive only - chk_transaction_type guarantees this never happens
+
+    const bucket = BANK_PAYMENT_MODES.includes(txn.payment_mode) ? 'online' : 'cash';
+    const side = txn.direction === 'Cr' ? 'income' : 'expense';
+    const amount = Number(txn.amount);
+    row[side][bucket] += amount;
+
+    if (txn.transaction_type === 'Other') {
+      const groups = side === 'income' ? otherIncomeGroups : otherExpenseGroups;
+      const key = (txn.description || '').trim();
+      const group = groups.get(key) || { description: key, count: 0, online: 0, cash: 0 };
+      group.count += 1;
+      group[bucket] += amount;
+      groups.set(key, group);
+    }
+  }
+
+  for (const row of rows) {
+    row.income.online = round2(row.income.online);
+    row.income.cash = round2(row.income.cash);
+    row.expense.online = round2(row.expense.online);
+    row.expense.cash = round2(row.expense.cash);
+  }
+
+  const toBreakdownList = (groups) =>
+    [...groups.values()]
+      .map((group) => ({ ...group, online: round2(group.online), cash: round2(group.cash), total: round2(group.online + group.cash) }))
+      .sort((a, b) => a.description.localeCompare(b.description));
+
+  const otherRow = rowByType.get('Other');
+  otherRow.incomeBreakdown = toBreakdownList(otherIncomeGroups);
+  otherRow.expenseBreakdown = toBreakdownList(otherExpenseGroups);
+
+  const totals = {
+    income: {
+      online: round2(rows.reduce((sum, row) => sum + row.income.online, 0)),
+      cash: round2(rows.reduce((sum, row) => sum + row.income.cash, 0)),
+    },
+    expense: {
+      online: round2(rows.reduce((sum, row) => sum + row.expense.online, 0)),
+      cash: round2(rows.reduce((sum, row) => sum + row.expense.cash, 0)),
+    },
+  };
+
+  const overallTotal = {
+    income: round2(totals.income.online + totals.income.cash),
+    expense: round2(totals.expense.online + totals.expense.cash),
+  };
+
+  const maintenanceRow = rowByType.get('Maintenance');
+  const maintenanceBreakup = {
+    online: maintenanceRow.income.online,
+    cash: maintenanceRow.income.cash,
+    total: round2(maintenanceRow.income.online + maintenanceRow.income.cash),
+  };
+
+  return { rows, totals, overallTotal, maintenanceBreakup };
+}
+
+// The Month-End Closing generation guard: counts every still-Submitted
+// (unresolved) transaction in this society whose own date - txn_date if
+// given, created_at otherwise, the same "prefer the resident-supplied date
+// for display, fall back to a column that's always set" reasoning as every
+// other date-sensitive report in this file - falls on or before the last
+// day of the target month (`rangeEnd`, exclusive). Confirmed with the user:
+// this replaces a simpler lock/no-lock flag entirely - generation itself
+// stays freely re-runnable any number of times, but is blocked outright
+// while anything that could still turn into a Verified transaction dated
+// in-or-before this month remains sitting in the review queue.
+async function countBlockingSubmittedTransactions(supabase, societyId, rangeEnd) {
+  const { data: submitted, error } = await supabase
+    .from('transactions')
+    .select('id, txn_date, created_at')
+    .eq('society_id', societyId)
+    .eq('processing_status', 'Submitted');
+
+  if (error) throw new Error(error.message);
+
+  return (submitted || []).filter((txn) => {
+    // txn_date is TIMESTAMPTZ, already a full ISO timestamp from Supabase
+    // (e.g. "2026-02-10T00:00:00+00:00") - not a plain "YYYY-MM-DD" string,
+    // so it must be parsed as-is rather than having a second time-of-day
+    // suffix appended (which previously produced an invalid, always-false-
+    // comparing Date).
+    const cutoff = txn.txn_date ? new Date(txn.txn_date) : new Date(txn.created_at);
+    return cutoff < rangeEnd;
+  }).length;
+}
 
 // GET /society - Admin or Committee (of at least one Active membership)
 // lists every society they administer/sit on committee of - in practice
@@ -451,15 +611,23 @@ function formatPeriodMonthLabel(periodMonth) {
   return `${MONTH_NAMES[month - 1]} ${year}`;
 }
 
-// GET /society/:id/transaction-report?month=YYYY-MM - Admin or Committee
-// (same view-only split as every other report in this file). The "view
-// transaction report at society level" ask: a flat, whole-society ledger
-// for a chosen calendar month - every Verified transaction (money that
-// actually moved, in either direction), not the full-history/any-status
-// GET /transactions/report listing (that one is filterable but has no
-// single-dimension month filter and returns every processing_status,
+// GET /society/:id/transaction-report?month=YYYY-MM (or ?from=&to=, plus
+// an optional &mode=) - Admin or Committee (same view-only split as every
+// other report in this file). The "view transaction report at society
+// level" ask: a flat, whole-society ledger for a chosen calendar month -
+// every Verified transaction (money that actually moved, in either
+// direction), not the full-history/any-status GET /transactions/report
+// listing (that one is filterable but returns every processing_status,
 // which is the wrong shape for a bookkeeping ledger someone reads
 // month-by-month).
+//
+// ?from=/?to= (plain YYYY-MM-DD dates, each independently optional) let
+// the caller narrow to an arbitrary custom range instead of a whole
+// calendar month, and take precedence over ?month= whenever either is
+// given - ?month= is only ever consulted when neither is present, so the
+// default "no filter at all" behavior (current month) is unchanged.
+// ?mode= (one of PAYMENT_MODES) is a separate, independent filter that
+// ANDs with whichever date range is in effect.
 //
 // Filtered on verified_at, not the resident/Admin-supplied txn_date -
 // same reasoning as GET /transactions/report's own from/to filter and
@@ -472,11 +640,14 @@ function formatPeriodMonthLabel(periodMonth) {
 // still what gets *displayed* as the transaction date below - it is only
 // unsafe as a filter, not as a display value.
 //
-// Cr/Dr is derived from transaction_type: Maintenance and WaterCharge are
-// both a resident paying the society (money in, Cr); UtilityBill/Salary/
-// Other are the society paying someone else (money out, Dr) - the same
-// split already established by the "two entirely separate paths" comment
-// on POST / in routes/transactions.js.
+// Cr/Dr is read straight from transactions.direction (added in
+// 20260807000000_add_direction_and_month_end_closing.sql), not inferred
+// from transaction_type - Maintenance/WaterCharge are always Cr and
+// Salary/UtilityBill are always Dr (enforced by chk_direction_matches_type
+// underneath, the same split already established by the "two entirely
+// separate paths" comment on POST / in routes/transactions.js), but Other
+// can genuinely be either, which a type-only inference could never
+// represent.
 //
 // description is synthesized rather than read from a column for
 // Maintenance rows specifically: those never have transactions.description
@@ -493,7 +664,7 @@ function formatPeriodMonthLabel(periodMonth) {
 router.get('/:id/transaction-report', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id: societyId } = req.params;
-  const { month } = req.query;
+  const { month, from, to, mode } = req.query;
 
   let callerAllowed;
   try {
@@ -505,30 +676,61 @@ router.get('/:id/transaction-report', authenticate, async (req, res) => {
     return res.status(403).json({ error: 'Only an Admin or Committee member can view the transaction report.' });
   }
 
-  let targetMonth;
-  if (month !== undefined) {
-    if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
-      return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
-    }
-    targetMonth = month;
-  } else {
-    const now = startOfCurrentMonthUtc();
-    targetMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  if (mode !== undefined && !PAYMENT_MODES.includes(mode)) {
+    return res.status(400).json({ error: `mode must be one of: ${PAYMENT_MODES.join(', ')}.` });
   }
 
-  const rangeStart = new Date(`${targetMonth}-01T00:00:00.000Z`);
-  const rangeEnd = addMonths(rangeStart, 1);
+  let targetMonth;
+  let rangeStart;
+  let rangeEnd;
+  if (from !== undefined || to !== undefined) {
+    if (from !== undefined) {
+      if (typeof from !== 'string' || !DATE_PATTERN.test(from) || Number.isNaN(Date.parse(`${from}T00:00:00.000Z`))) {
+        return res.status(400).json({ error: 'from must be a valid date in YYYY-MM-DD format.' });
+      }
+      rangeStart = new Date(`${from}T00:00:00.000Z`);
+    }
+    if (to !== undefined) {
+      if (typeof to !== 'string' || !DATE_PATTERN.test(to) || Number.isNaN(Date.parse(`${to}T00:00:00.000Z`))) {
+        return res.status(400).json({ error: 'to must be a valid date in YYYY-MM-DD format.' });
+      }
+      // The upper bound applied to the query below is exclusive, so this
+      // resolves to midnight the day *after* "to" - making "to" itself
+      // inclusive, same reasoning as every other date-only range in this
+      // codebase (e.g. this route's own month-derived rangeEnd).
+      rangeEnd = new Date(Date.parse(`${to}T00:00:00.000Z`) + 24 * 60 * 60 * 1000);
+    }
+    if (rangeStart !== undefined && rangeEnd !== undefined && rangeStart >= rangeEnd) {
+      return res.status(400).json({ error: 'from must be on or before to.' });
+    }
+  } else {
+    if (month !== undefined) {
+      if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+        return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+      }
+      targetMonth = month;
+    } else {
+      const now = startOfCurrentMonthUtc();
+      targetMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
+    rangeStart = new Date(`${targetMonth}-01T00:00:00.000Z`);
+    rangeEnd = addMonths(rangeStart, 1);
+  }
 
-  const { data: transactions, error: transactionsError } = await supabase
+  let query = supabase
     .from('transactions')
     .select(
-      'id, house_id, amount, transaction_type, utr_number, payment_mode, payee_name, description, txn_date, verified_at, houses(house_number), transaction_allocations(billing_periods(period_month))'
+      'id, house_id, amount, transaction_type, direction, utr_number, payment_mode, payee_name, description, txn_date, verified_at, houses(house_number), transaction_allocations(billing_periods(period_month))'
     )
     .eq('society_id', societyId)
     .eq('processing_status', 'Verified')
-    .gte('verified_at', rangeStart.toISOString())
-    .lt('verified_at', rangeEnd.toISOString())
     .order('verified_at', { ascending: true });
+
+  if (rangeStart !== undefined) query = query.gte('verified_at', rangeStart.toISOString());
+  if (rangeEnd !== undefined) query = query.lt('verified_at', rangeEnd.toISOString());
+  if (mode !== undefined) query = query.eq('payment_mode', mode);
+
+  const { data: transactions, error: transactionsError } = await query;
 
   if (transactionsError) {
     return res.status(500).json({ error: transactionsError.message });
@@ -563,13 +765,19 @@ router.get('/:id/transaction-report', authenticate, async (req, res) => {
       utr_number: txn.utr_number,
       payment_mode: txn.payment_mode,
       transaction_type: txn.transaction_type,
-      direction: isMaintenance || isWaterCharge ? 'Cr' : 'Dr',
+      direction: txn.direction,
       amount: txn.amount,
       description,
     };
   });
 
-  res.json({ month: targetMonth, transactions: rows });
+  res.json({
+    month: targetMonth || null,
+    from: rangeStart ? toDateOnly(rangeStart) : null,
+    to: rangeEnd ? toDateOnly(new Date(rangeEnd.getTime() - 24 * 60 * 60 * 1000)) : null,
+    mode: mode || null,
+    transactions: rows,
+  });
 });
 
 // POST /society/:id/billing-periods/generate-next-month - Admin-only. The
@@ -708,7 +916,7 @@ router.post('/:id/billing-periods/generate-next-month', authenticate, async (req
 // catch a typo'd filter value with a clear 400 rather than a silently-empty
 // result, not to enforce a real schema rule. Keep manually in sync with any
 // future audit_events.insert() call site.
-const AUDIT_ENTITY_TYPES = ['society', 'billing_period', 'transaction', 'resident_house_assignment', 'society_member'];
+const AUDIT_ENTITY_TYPES = ['society', 'billing_period', 'transaction', 'resident_house_assignment', 'society_member', 'month_closing'];
 const AUDIT_ACTIONS = [
   'Created',
   'Updated',
@@ -806,6 +1014,319 @@ router.get('/:id/audit-log', authenticate, async (req, res) => {
   }
 
   res.json(events);
+});
+
+// GET /society/:id/month-end-closing?month=YYYY-MM - the Month-End Closing
+// report: Opening Balance -> Income/Expense grid (Bank vs Cash, one row per
+// transaction type, Other broken down by exact-match description) ->
+// Overall Total -> Closing Balance -> Maintenance Online-vs-Cash breakup.
+//
+// Access is deliberately asymmetric, confirmed with the user while
+// designing this feature:
+//   - Admin always gets a live-computed preview, even for a month that has
+//     never been generated/saved yet, so they can see the numbers before
+//     deciding to actually generate (and sees `guard` below so they know
+//     up front whether generation is currently blocked).
+//   - Committee only ever sees a month that has already been
+//     generated/saved by an Admin (`generated: true`) - for a
+//     not-yet-generated month, they get `generated: false` and nothing
+//     else, never a live preview of unsaved numbers.
+// Once a month IS generated, both roles see the exact same figures,
+// computed the same way - Income/Expense is always recomputed live from
+// this month's Verified transactions (deterministic - Verified rows are
+// never edited after the fact), while Opening/Closing Balance uses the
+// saved row's Admin-supplied opening balance rather than re-guessing it.
+router.get('/:id/month-end-closing', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { month } = req.query;
+
+  let callerIsAdmin;
+  let callerIsAdminOrCommittee;
+  try {
+    callerIsAdmin = await requireActiveAdmin(supabase, req.user.id, societyId);
+    callerIsAdminOrCommittee = callerIsAdmin || (await requireActiveAdminOrCommittee(supabase, req.user.id, societyId));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerIsAdminOrCommittee) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the Month-End Closing report.' });
+  }
+
+  let targetMonth;
+  if (month !== undefined) {
+    if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+      return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+    }
+    targetMonth = month;
+  } else {
+    const now = startOfCurrentMonthUtc();
+    targetMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+  const monthDate = `${targetMonth}-01`;
+
+  const { data: savedRow, error: savedError } = await supabase
+    .from('society_month_closings')
+    .select('*')
+    .eq('society_id', societyId)
+    .eq('month', monthDate)
+    .maybeSingle();
+
+  if (savedError) {
+    return res.status(500).json({ error: savedError.message });
+  }
+
+  const isGenerated = !!savedRow;
+  if (!callerIsAdmin && !isGenerated) {
+    return res.json({ month: targetMonth, generated: false });
+  }
+
+  const rangeStart = new Date(`${targetMonth}-01T00:00:00.000Z`);
+  const rangeEnd = addMonths(rangeStart, 1);
+
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('transactions')
+    .select('id, transaction_type, direction, payment_mode, amount, description')
+    .eq('society_id', societyId)
+    .eq('processing_status', 'Verified')
+    .gte('verified_at', rangeStart.toISOString())
+    .lt('verified_at', rangeEnd.toISOString());
+
+  if (transactionsError) {
+    return res.status(500).json({ error: transactionsError.message });
+  }
+
+  const figures = computeMonthEndClosingFigures(transactions || []);
+
+  let openingBalance;
+  let openingBalanceSource;
+  if (savedRow) {
+    openingBalance = { bank: Number(savedRow.bank_opening_balance), cash: Number(savedRow.cash_opening_balance) };
+    openingBalanceSource = 'saved';
+  } else {
+    const { data: previousRow, error: previousError } = await supabase
+      .from('society_month_closings')
+      .select('bank_closing_balance, cash_closing_balance')
+      .eq('society_id', societyId)
+      .eq('month', toDateOnly(addMonths(monthDate, -1)))
+      .maybeSingle();
+
+    if (previousError) {
+      return res.status(500).json({ error: previousError.message });
+    }
+
+    if (previousRow) {
+      openingBalance = { bank: Number(previousRow.bank_closing_balance), cash: Number(previousRow.cash_closing_balance) };
+      openingBalanceSource = 'previous_month_closing';
+    } else {
+      openingBalance = { bank: 0, cash: 0 };
+      openingBalanceSource = 'none';
+    }
+  }
+
+  const closingBalance = {
+    bank: round2(openingBalance.bank + figures.totals.income.online - figures.totals.expense.online),
+    cash: round2(openingBalance.cash + figures.totals.income.cash - figures.totals.expense.cash),
+  };
+
+  let guard;
+  if (callerIsAdmin) {
+    let blockedCount;
+    try {
+      blockedCount = await countBlockingSubmittedTransactions(supabase, societyId, rangeEnd);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    guard = { blocked: blockedCount > 0, blockedCount };
+  }
+
+  res.json({
+    month: targetMonth,
+    generated: isGenerated,
+    generatedAt: savedRow ? savedRow.updated_at : null,
+    openingBalance: { ...openingBalance, source: openingBalanceSource },
+    closingBalance,
+    incomeExpense: { rows: figures.rows, totals: figures.totals },
+    overallTotal: figures.overallTotal,
+    maintenanceBreakup: figures.maintenanceBreakup,
+    guard,
+  });
+});
+
+// POST /society/:id/month-end-closing - Admin-only. Computes and saves
+// (upserts - freely re-runnable, see countBlockingSubmittedTransactions's
+// own comment on why there is no separate Lock flag) this month's Bank and
+// Cash Closing Balance from an Admin-supplied Opening Balance.
+//
+// bank_opening_balance/cash_opening_balance are both optional - when
+// omitted, defaults to whatever is already saved for this exact month (a
+// plain re-run), or otherwise the immediately preceding month's own saved
+// Closing Balance ("current month's closing balance becomes next month's
+// opening balance" - the user's own framing), or zero as the last resort
+// for a society's very first-ever generated month. Passing either one
+// explicitly is how the Admin exercises the override this was built for:
+// correcting for a bank-only entry that never went through
+// POST /transactions at all (a bank charge, an interest credit) rather
+// than skewing every subsequent month's Bank ledger by that same missed
+// amount forever.
+router.post('/:id/month-end-closing', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+  const { month, bank_opening_balance, cash_opening_balance } = req.body || {};
+
+  let callerIsAdmin;
+  try {
+    callerIsAdmin = await requireActiveAdmin(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerIsAdmin) {
+    return res.status(403).json({ error: 'Only an Admin of this society can generate the Month-End Closing report.' });
+  }
+
+  if (typeof month !== 'string' || !MONTH_PATTERN.test(month)) {
+    return res.status(400).json({ error: 'month must be in YYYY-MM format, e.g. 2026-07.' });
+  }
+  if (bank_opening_balance !== undefined && !Number.isFinite(bank_opening_balance)) {
+    return res.status(400).json({ error: 'bank_opening_balance must be a number.' });
+  }
+  if (cash_opening_balance !== undefined && !Number.isFinite(cash_opening_balance)) {
+    return res.status(400).json({ error: 'cash_opening_balance must be a number.' });
+  }
+
+  const monthDate = `${month}-01`;
+  const rangeStart = new Date(`${month}-01T00:00:00.000Z`);
+  const rangeEnd = addMonths(rangeStart, 1);
+
+  let blockedCount;
+  try {
+    blockedCount = await countBlockingSubmittedTransactions(supabase, societyId, rangeEnd);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (blockedCount > 0) {
+    return res.status(409).json({
+      error: `${blockedCount} transaction(s) dated on or before ${month} ${blockedCount === 1 ? 'is' : 'are'} still awaiting review (Submitted). Verify or reject ${blockedCount === 1 ? 'it' : 'them'} before generating this month's closing.`,
+      blockedCount,
+    });
+  }
+
+  const { data: existingRow, error: existingError } = await supabase
+    .from('society_month_closings')
+    .select('id, bank_opening_balance, cash_opening_balance')
+    .eq('society_id', societyId)
+    .eq('month', monthDate)
+    .maybeSingle();
+
+  if (existingError) {
+    return res.status(500).json({ error: existingError.message });
+  }
+
+  const overrideProvided = bank_opening_balance !== undefined || cash_opening_balance !== undefined;
+
+  let openingBalance;
+  let openingBalanceSource;
+  if (overrideProvided) {
+    openingBalance = {
+      bank: bank_opening_balance !== undefined ? bank_opening_balance : existingRow ? Number(existingRow.bank_opening_balance) : 0,
+      cash: cash_opening_balance !== undefined ? cash_opening_balance : existingRow ? Number(existingRow.cash_opening_balance) : 0,
+    };
+    openingBalanceSource = 'manual_override';
+  } else if (existingRow) {
+    openingBalance = { bank: Number(existingRow.bank_opening_balance), cash: Number(existingRow.cash_opening_balance) };
+    openingBalanceSource = 'saved';
+  } else {
+    const { data: previousRow, error: previousError } = await supabase
+      .from('society_month_closings')
+      .select('bank_closing_balance, cash_closing_balance')
+      .eq('society_id', societyId)
+      .eq('month', toDateOnly(addMonths(monthDate, -1)))
+      .maybeSingle();
+
+    if (previousError) {
+      return res.status(500).json({ error: previousError.message });
+    }
+
+    openingBalance = previousRow
+      ? { bank: Number(previousRow.bank_closing_balance), cash: Number(previousRow.cash_closing_balance) }
+      : { bank: 0, cash: 0 };
+    openingBalanceSource = previousRow ? 'previous_month_closing' : 'none';
+  }
+
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('transactions')
+    .select('id, transaction_type, direction, payment_mode, amount, description')
+    .eq('society_id', societyId)
+    .eq('processing_status', 'Verified')
+    .gte('verified_at', rangeStart.toISOString())
+    .lt('verified_at', rangeEnd.toISOString());
+
+  if (transactionsError) {
+    return res.status(500).json({ error: transactionsError.message });
+  }
+
+  const figures = computeMonthEndClosingFigures(transactions || []);
+
+  const closingBalance = {
+    bank: round2(openingBalance.bank + figures.totals.income.online - figures.totals.expense.online),
+    cash: round2(openingBalance.cash + figures.totals.income.cash - figures.totals.expense.cash),
+  };
+
+  const { data: saved, error: saveError } = await supabase
+    .from('society_month_closings')
+    .upsert(
+      {
+        society_id: societyId,
+        month: monthDate,
+        bank_opening_balance: openingBalance.bank,
+        cash_opening_balance: openingBalance.cash,
+        bank_closing_balance: closingBalance.bank,
+        cash_closing_balance: closingBalance.cash,
+        generated_by: req.user.id,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'society_id,month' }
+    )
+    .select()
+    .single();
+
+  if (saveError) {
+    return res.status(500).json({ error: saveError.message });
+  }
+
+  const { error: auditError } = await supabase.from('audit_events').insert({
+    society_id: societyId,
+    actor_user_id: req.user.id,
+    entity_type: 'month_closing',
+    entity_id: saved.id,
+    action: existingRow ? 'Updated' : 'Created',
+    metadata: {
+      month,
+      openingBalance,
+      openingBalanceSource,
+      closingBalance,
+      overallTotal: figures.overallTotal,
+      regenerated: !!existingRow,
+    },
+  });
+
+  if (auditError) {
+    return res.status(500).json({
+      error: `Month-End Closing generated but the audit log entry failed: ${auditError.message}`,
+      monthClosing: saved,
+    });
+  }
+
+  res.json({
+    month,
+    generated: true,
+    generatedAt: saved.updated_at,
+    openingBalance: { ...openingBalance, source: openingBalanceSource },
+    closingBalance,
+    incomeExpense: { rows: figures.rows, totals: figures.totals },
+    overallTotal: figures.overallTotal,
+    maintenanceBreakup: figures.maintenanceBreakup,
+  });
 });
 
 module.exports = router;

@@ -71,7 +71,14 @@ function describeAllocations(transaction) {
 // actions stay directly on each row, always visible below it, rather than
 // hidden behind the tap - unlike a pure history list, doing something
 // about each row is this screen's entire purpose.
-export default function AdminReviewScreen({ onBack }) {
+// isAdmin gates Verify/Reject only - Committee members still see this
+// whole queue (same read access GET /transactions/pending already grants
+// them), just without the two action buttons on each row, replaced by a
+// plain "View only" note. See routes/transactions.js's
+// loadTransactionAndCheckAdmin, which already rejects both actions
+// server-side for a Committee-only caller - this mirrors that rule in the
+// UI instead of letting the tap round-trip into a 403.
+export default function AdminReviewScreen({ isAdmin, onBack }) {
   const { accessToken } = useAuth();
   const [pending, setPending] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -229,7 +236,9 @@ export default function AdminReviewScreen({ onBack }) {
 
                 {state.error && <Text style={styles.rowError}>{state.error}</Text>}
 
-                {isRejecting ? (
+                {!isAdmin ? (
+                  <Text style={styles.viewOnlyNote}>View only - ask an Admin to verify or reject this.</Text>
+                ) : isRejecting ? (
                   <View style={styles.rejectBox}>
                     <TextInput
                       style={styles.reasonInput}
@@ -394,6 +403,13 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     fontSize: 13,
     marginTop: 8,
+  },
+  viewOnlyNote: {
+    fontSize: 12,
+    color: '#8a8a8e',
+    fontStyle: 'italic',
+    marginTop: 10,
+    textAlign: 'right',
   },
   actionRow: {
     flexDirection: 'row',
