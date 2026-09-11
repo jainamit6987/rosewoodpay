@@ -1,9 +1,15 @@
-# Personal Laptop: Setup and Postman Testing Guide
+# Personal Laptop: Setup and Real-Device Testing Guide
 
-Use this the first time you pick up this project on the personal laptop, and
-as a reference for manual Postman testing afterward. This file is safe to
-commit - it contains no real secrets, only variable names and seeded
-dev-only test credentials.
+Rewritten 2026-09-11 - the previous version of this file was from very
+early in the project (before most of the backend/mobile app existed) and
+was badly out of date. This version reflects the current state: a full
+Admin+Resident mobile app, and a brand-new PaySharp UPI Intent gateway
+integration that's the whole reason for moving to this laptop (this work
+laptop's network runs a Zscaler web-security proxy that blocks the
+PaySharp order-status endpoint - see `paysharp_sandbox_credentials.txt`).
+
+This machine has no Cursor access, so everything below is meant to be
+followed by hand, without an AI agent driving it.
 
 ## 1. One-Time Setup
 
@@ -20,6 +26,12 @@ If you already cloned it before, just:
 git pull
 ```
 
+**As of 2026-09-11, the entire PaySharp integration (backend + mobile) is
+pushed to `main`** - `git pull` gets you everything described in this
+guide. If anything below doesn't match what you see, check
+`Society_App_Progress_Log.md`'s most recent entries first - that always
+wins over this file.
+
 ### 1.2 Check git identity (only if this is a fresh clone)
 
 The work laptop uses a repo-local git identity override so commits are
@@ -30,9 +42,9 @@ what this laptop's *global* git identity already is:
 git config user.email
 ```
 
-If it's already your personal email, you don't need to do anything. If not,
-set a repo-local override the same way (run inside the repo folder, no
-`--global`):
+If it's already your personal email, you don't need to do anything. If
+not, set a repo-local override the same way (run inside the repo folder,
+no `--global`):
 
 ```bash
 git config user.name "Your Personal Name"
@@ -41,7 +53,8 @@ git config user.email "your-personal-email@example.com"
 
 ### 1.3 Install backend dependencies
 
-`node_modules/` is not tracked by git, so this must be run on every machine.
+`node_modules/` is not tracked by git, so this must be run on every
+machine.
 
 ```bash
 cd backend
@@ -51,61 +64,80 @@ npm install
 ### 1.4 Create the backend `.env` file
 
 This file is git-ignored on purpose and will not come through `git pull`.
-Copy the example and fill in the real values from the Supabase dashboard
-(Settings -> API for the keys, or reuse the same values already configured
-in `backend/.env` on the work laptop):
 
 ```bash
 cp .env.example .env
 ```
 
-Then edit `backend/.env` and fill in:
+Then edit `backend/.env`:
 
 | Variable | Where to find it |
 | :--- | :--- |
+| `PORT` | `4000` (or any free port) |
 | `SUPABASE_URL` | `https://hzjnbunuinewbeaxzxhh.supabase.co` |
 | `SUPABASE_ANON_KEY` | Supabase Dashboard -> Settings -> API -> `sb_publishable_...` key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard -> Settings -> API -> `sb_secret_...` key (keep this one private) |
-| `PORT` | `4000` (or any free port) |
+| `PAYSHARP_BASE_URL` | `https://sandbox.paysharp.co.in/external/api/v1/upi` |
+| `PAYSHARP_API_TOKEN` | **Generate fresh from the PaySharp dashboard every session - sandbox tokens expire after ~1 day.** Log into `https://sandbox.paysharp.co.in/client-admin` (new password - not written down anywhere in this repo, check your password manager), go to Settings/Configuration, generate a new token. |
+| `PAYSHARP_WEBHOOK_SECRET` | `4c7a55b7c0dc107496eb25a5fb7cebd85b6246eb953f24dab34ad783ba709f5c` (this one does NOT expire - reuse it, it just needs to match whatever you register in the dashboard, see Section 4) |
 
-### 1.5 (Optional) Link the Supabase CLI properly
+All three `PAYSHARP_*` variables are optional as far as the backend
+booting goes - leave them unset and everything else still works, you just
+can't use the Instant UPI Payment button or the webhook endpoint. See
+`paysharp_sandbox_credentials.txt` (git-ignored, exists only on machines
+that have run this setup before) for more detail/history on these values.
 
-The work laptop's network only allows outbound HTTPS, so the CLI's
-`supabase link` / `supabase db push` (which need a raw Postgres connection)
-could not be used there - migrations were applied manually via the Supabase
-Studio SQL Editor instead. The personal laptop should have normal network
-access, so the CLI can be used properly here. **Before running `db push` for
-the first time**, reconcile the CLI's migration history with what has
-already been applied, or it will try to re-run the existing migrations and
-fail with "already exists" errors:
+### 1.5 Applying database migrations
 
-```bash
-cd ..   # back to the repo root, where the supabase/ folder lives
-supabase link --project-ref hzjnbunuinewbeaxzxhh
-supabase migration repair --status applied 20260724000000
-supabase migration repair --status applied 20260724100000
-supabase migration repair --status applied 20260724120000
-supabase migration repair --status applied 20260725000000
-supabase migration repair --status applied 20260725010000
-supabase migration repair --status applied 20260725020000
-supabase migration repair --status applied 20260725030000
-```
+This project has historically applied migrations by pasting them into the
+Supabase Studio SQL Editor (`https://supabase.com/dashboard/project/hzjnbunuinewbeaxzxhh/sql/new`)
+rather than the CLI, because the work laptop's network blocked raw
+Postgres connections. This personal laptop likely has normal outbound
+access, so you're welcome to try setting up `supabase link` +
+`supabase db push` properly (you'll need the project's Postgres password
+from Supabase Dashboard -> Settings -> Database, and to reconcile the
+CLI's migration history first with `supabase migration repair --status
+applied <version>` for everything already applied - check
+`Society_App_Progress_Log.md` for the full list of migration files and
+which are done).
 
-(Only mark a migration "applied" here if it has actually already been pasted
-into the SQL Editor - check `Society_App_Progress_Log.md` for which ones are
-still pending as of your last pull.)
+**But the simplest path, proven to work every time so far:** open the SQL
+Editor link above, and for each new file under `supabase/migrations/` (in
+filename/date order) that you haven't already applied, paste its contents
+and run it. Check `Society_App_Progress_Log.md`'s entries for which
+migrations exist and whether a given one says "applied by the user" - if
+it's not mentioned as applied, it probably isn't yet.
 
-After that, any *new* migration files can be applied normally with:
+As of 2026-09-11 the newest migration is
+`20260911000000_add_paysharp_gateway_fields_to_transactions.sql` (adds the
+`payment_gateway`/`paysharp_order_id`/etc. columns to `transactions`) -
+**already applied** to the shared hosted project during that session, so
+you should not need to re-run it, but double-check by looking at the
+`transactions` table's columns in Table Editor if anything PaySharp-related
+throws a "column does not exist" error.
 
-```bash
-supabase db push
-```
+### 1.6 Restore the seeded test fixtures (if needed)
 
-### 1.6 Start the backend
+The connected Supabase project's original test-fixture accounts
+(`admin@society.app`, `resident@society.app`, etc. - see Section 2) were
+at some point wiped out by a reseed with real "Rosewood Century" sample
+data. If any of the logins in Section 2 fail, run:
 
 ```bash
 cd backend
-node src/index.js
+node scripts/reseed-test-fixtures.js
+```
+
+This is idempotent (safe to run more than once - it skips anything that
+already exists) and recreates every fixture through the Supabase
+service-role API directly, no SQL Editor needed for this part. It does
+NOT touch or remove any of the real Rosewood Century data already there.
+
+### 1.7 Start the backend
+
+```bash
+cd backend
+npm run dev
 ```
 
 You should see:
@@ -114,11 +146,12 @@ You should see:
 society-app-backend listening on http://localhost:4000
 ```
 
-Leave this running in its own terminal window while you test with Postman.
+`npm run dev` uses `nodemon`, which auto-restarts on `.js`/`.json` file
+changes - but **not** on `.env` changes. If you edit `backend/.env` (e.g.
+a fresh `PAYSHARP_API_TOKEN`) while this is already running, stop it
+(Ctrl+C) and start it again, or type `rs` + Enter in that terminal.
 
-### 1.7 Sanity check
-
-Open `http://localhost:4000/health` in a browser or run:
+### 1.8 Sanity check
 
 ```bash
 curl http://localhost:4000/health
@@ -139,164 +172,21 @@ Expect `{"status":"ok","database":"connected","societiesCount":1}`. If
 
 Do not reuse these credentials anywhere outside this local dev project.
 
-Useful seeded IDs (fixed by `supabase/seed.sql`, same in every environment
-that runs it):
+Useful seeded IDs (fixed by `supabase/seed.sql` /
+`backend/scripts/reseed-test-fixtures.js`, same in every environment that
+runs either):
 
 | Item | ID |
 | :--- | :--- |
-| House A-101 (assigned to the resident) | `00000006-0000-0000-0000-000000000006` |
-| House R-24 (owned by Owner2, rented out to Tenant) | `00000007-0000-0000-0000-000000000007` |
-| House B-102 (Owner2's own residence) | `0000000c-0000-0000-0000-00000000000c` |
-| House C-303 (Arrears resident's house, 4 back-months + current) | `0000000f-0000-0000-0000-00000000000f` |
+| Society (Orchid Meadows) | `00000003-0000-0000-0000-000000000003` |
+| House A-101 (assigned to the resident, `default_monthly_amount` 2200) | `00000006-0000-0000-0000-000000000006` |
+| House R-24 (owned by Owner2, rented out to Tenant, 2500) | `00000007-0000-0000-0000-000000000007` |
+| House B-102 (Owner2's own residence, 2000) | `0000000c-0000-0000-0000-00000000000c` |
+| House C-303 (Arrears resident's house, 4 back-months + current, 2200) | `0000000f-0000-0000-0000-00000000000f` |
 
-Billing period IDs are not fixed - look them up via the `/me` response (see
-below) or the Supabase Studio Table Editor.
+## 3. Mobile App
 
-## 3. Postman Testing Steps
-
-### 3.1 Create an environment
-
-In Postman, create an environment (e.g. "Society App Local") with one
-variable: `base_url` = `http://localhost:4000`. Use `{{base_url}}` in every
-request URL below.
-
-### 3.2 Login
-
-- **Method/URL:** `POST {{base_url}}/auth/login`
-- **Body (raw JSON):**
-```json
-{
-  "email": "resident@society.app",
-  "password": "password"
-}
-```
-- **Tests tab** (auto-saves the token so you don't copy/paste it for every request):
-```javascript
-const json = pm.response.json();
-pm.environment.set("access_token", json.access_token);
-```
-- Expect `200` with `access_token`, `refresh_token`, `user`.
-
-Repeat with `admin@society.app` / `password` in a second saved request
-(e.g. save the token as `admin_access_token` instead) so you can test both
-roles side by side.
-
-### 3.3 Get profile (`/me`)
-
-- **Method/URL:** `GET {{base_url}}/me`
-- **Auth:** Type "Bearer Token", value `{{access_token}}`
-- Expect (as resident): your membership, `houseAssignments`, `openBillingPeriods`
-  (oldest-first), and `totalOutstanding` (sum of all open periods' `amount_due`
-  across every house you're assigned to). Expect (as admin): `houses` and
-  `billingPeriods` for the whole society instead.
-
-### 3.4 Submit a transaction (`/transactions`)
-
-`billing_period_id` is **not** part of the request at all, and a single
-transaction is no longer limited to one billing period either. The server
-always resolves allocation itself: it walks the house's `Open` periods
-oldest-first, consuming each one's own `amount_due` from the submitted
-`amount`, and auto-generates further periods (using the house's
-`default_monthly_amount`) if the amount covers more than currently exist -
-covering a normal single-month payment, clearing several months of arrears
-in one lump payment, and paying ahead of schedule, all with the same logic.
-The response includes an `allocations` array showing exactly which
-period(s) got how much.
-
-`transaction_type` is an optional field, defaulting to `"Maintenance"` if
-omitted. For `"Maintenance"` (the only type any real flow uses today),
-`amount` **must be a whole-number multiple of the house's
-`default_monthly_amount`** - e.g. 2200 or 4400 are fine, 3300 (1.5x) is
-rejected outright with `400`, before any billing-period lookup happens.
-`"UtilityBill"`, `"Salary"`, and `"Other"` are reserved for a future
-admin-recorded society-expense feature and are exempt from that multiple
-rule entirely (any positive amount is accepted) - they still go through the
-same house-scoped billing-period allocation as Maintenance today, since no
-alternate insert path exists yet; that's a known gap to revisit once that
-feature is actually built.
-
-- **Method/URL:** `POST {{base_url}}/transactions`
-- **Auth:** Bearer Token, `{{access_token}}`
-- **Body (raw JSON):**
-```json
-{
-  "house_id": "00000006-0000-0000-0000-000000000006",
-  "amount": 2200,
-  "utr_number": "MANUALTEST0001"
-}
-```
-- Expect `201` with `processing_status: "Submitted"`, `transaction_type:
-  "Maintenance"`, and an `allocations` array with exactly one entry.
-
-To see FIFO allocation pick an old month instead of the current one, log in
-as `arrears@society.app` / `password` and submit against house
-`0000000f-0000-0000-0000-00000000000f` (C-303) instead - that resident has
-3 back-months plus the current month still `Open` (one older month is
-already `Closed`), so the single allocation entry will point at a period
-3 months old, not the current month.
-
-To see one payment split across multiple periods, submit `amount: 4400`
-against C-303 instead of `2200` - expect two entries in `allocations`, one
-per period, each `amount_allocated: 2200`.
-
-### 3.5 Try the rejection cases (each should fail on purpose)
-
-| Case | Change from 3.4 | Expected status |
-| :--- | :--- | :--- |
-| No auth header | Remove the Bearer token | `401` |
-| Missing fields | Remove `house_id` | `400` |
-| No proof of any kind | Remove `utr_number` and don't add `raw_shared_payload`/`proof_file_path` | `400` |
-| Wrong house | Use house `00000007-0000-0000-0000-000000000007` (R-24) while logged in as the resident | `403` |
-| Duplicate UTR | Resubmit the exact same `utr_number` from a request that already succeeded | `409` |
-| Partial-month amount | `amount: 3300` (1.5x the base amount) against A-101 | `400` |
-| Unrecognized transaction_type | `"transaction_type": "NotARealType"` | `400` |
-
-### 3.6 Clean up test transactions afterward
-
-Postman submissions are not auto-deleted like the automated test scripts.
-Prefix any test UTRs with something recognizable (e.g. `MANUALTEST...`) and
-delete them afterward via the Supabase Studio Table Editor or SQL Editor:
-
-```sql
-delete from transactions where utr_number like 'MANUALTEST%';
-```
-
-## 4. What's Already Done vs. Not Yet Built
-
-Done and verified (see `Society_App_Progress_Log.md` for full detail):
-`GET /health`, `POST /auth/login`, `POST /auth/logout`, `GET /me`,
-`POST /transactions`, and a first resident-facing mobile app (`mobile/` -
-login, view dues, submit a payment; see Section 6).
-
-Not built yet: admin invite/create-member endpoint, transaction
-verify/reject workflow, proof-file upload/storage handling, AI extraction
-queue, most admin CRUD endpoints (society/members/houses/assignments/
-billing periods), and the admin side of the mobile app. See the "Backend
-API Coverage Review" entry in `Society_App_Progress_Log.md` for the full
-gap list and suggested build order.
-
-## 5. Resuming Tomorrow
-
-Record whatever you find while testing (bugs, questions, blockers) in
-`Society_App_Progress_Log.md` under a new dated section, the same way every
-other session in this project has been logged.
-
-## 6. Mobile App (Resident MVP)
-
-`mobile/` is an Expo/React Native app (SDK 57, plain JavaScript, no
-TypeScript) covering three resident-facing screens: **Login**, **Dues**
-(assigned houses, open billing periods, total outstanding), and **Submit
-Payment** (enter an amount + UTR, with a "Pay via UPI" button that opens a
-`upi://pay` deep link first). No admin screens exist yet, and payment
-submission is manual-UTR-entry only - there is no OS share-sheet capture
-(`react-native-share-menu`) in this pass, since that requires a custom Expo
-dev client rather than plain Expo Go. There is also no React Navigation -
-with only 3 screens in a strictly linear flow, `App.js` just switches
-between them with plain React state, avoiding React Navigation 8.x's
-custom-dev-client requirement (it doesn't run in Expo Go) for a dependency
-this app doesn't need yet.
-
-### 6.1 Setup
+### 3.1 Setup
 
 ```bash
 cd mobile
@@ -310,37 +200,259 @@ Edit `mobile/.env`:
 | :--- | :--- |
 | `EXPO_PUBLIC_SUPABASE_URL` | Same as `backend/.env`'s `SUPABASE_URL` |
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Same as `backend/.env`'s `SUPABASE_ANON_KEY` |
-| `EXPO_PUBLIC_BACKEND_URL` | Your machine's **LAN IP**, not `localhost` - e.g. `http://192.168.1.23:4000`. A phone running Expo Go is a separate device on the network from wherever the backend runs, so `localhost` would point at the phone itself. Find your LAN IP with `ipconfig` (Windows) and confirm the backend is bound to `0.0.0.0` or your LAN interface, not just `127.0.0.1`. |
+| `EXPO_PUBLIC_BACKEND_URL` | See below - depends on whether you're doing plain feature testing or real PaySharp device testing. |
+
+**For plain feature testing** (not PaySharp), use your machine's **LAN
+IP**, not `localhost` - e.g. `http://192.168.1.23:4000`. A phone running
+Expo Go is a separate device on the network from wherever the backend
+runs. Find your LAN IP with `ipconfig` (Windows, look for `IPv4 Address`
+under your active adapter) and make sure your phone is on the *same*
+Wi-Fi network.
+
+**For PaySharp real-device testing**, use the ngrok HTTPS URL from Section
+4 instead - see why there.
 
 Every variable **must** be prefixed `EXPO_PUBLIC_` to be readable at all -
 Expo only inlines that prefix into the app bundle - and none of them are
-secret once inlined (the anon key already isn't secret anywhere else in
-this project either). Restart the Expo dev server after editing `.env`;
-values are inlined at bundle time, not read live.
+secret once inlined. **Restart the Expo dev server after editing
+`.env`** - values are inlined at bundle time, not read live.
 
-### 6.2 Run it
+### 3.2 Run it
 
-With the backend already running (Section 1.6) on the same network as your
-phone:
+With the backend already running (Section 1.7):
 
 ```bash
 npx expo start
 ```
 
-Scan the QR code with the **Expo Go** app (from the Play Store/App Store) on
-a phone on the same Wi-Fi network. Sign in with any of the seeded resident
-accounts from Section 2 (e.g. `resident@society.app` / `password`, or
-`arrears@society.app` / `password` to see several months of open dues at
-once).
+Scan the QR code with the **Expo Go** app (Play Store/App Store) on a
+phone. Sign in with any seeded account from Section 2.
 
-### 6.3 Known rough edges in this first pass
+## 4. Real-Device PaySharp Testing
 
-* Sessions persist in plain `AsyncStorage`, not encrypted storage - fine for
-  this dev/testing phase, not for a real release (see the comment in
-  `mobile/src/config/supabaseClient.js`).
-* The "Pay via UPI" button opens the deep link without a `Linking.canOpenURL`
-  pre-check - that check is unreliable on Android 11+ without declaring the
-  `upi://` scheme via a config plugin (which needs a custom dev client). It
-  opens directly and shows an error only if no app can actually handle it.
-* Signed-in Admin/Committee accounts see a placeholder message instead of a
-  real screen - there is no admin UI yet.
+This is the actual point of testing on this laptop - the work laptop's
+Zscaler proxy blocks `GET .../order/{orderId}` (PaySharp's order-status
+endpoint), so the polling fallback (`GET /transactions/:id/status`)
+couldn't be fully exercised there. It should work cleanly from here.
+
+### 4.1 Why you need ngrok (or similar) even for local testing
+
+PaySharp needs to reach your backend over the public internet to deliver
+its webhook (`POST /webhooks/paysharp`) - `localhost`/LAN IPs are not
+reachable from PaySharp's servers. **ngrok** (or any similar tunnel tool)
+gives your local backend a temporary public HTTPS URL.
+
+Using that *same* ngrok URL for `EXPO_PUBLIC_BACKEND_URL` too (instead of
+your LAN IP) is simpler and more robust: your phone no longer needs to be
+on the same Wi-Fi as your laptop at all (you can test over cellular data),
+and there's only one URL to keep track of.
+
+### 4.2 Set up ngrok
+
+```bash
+# Install (one-time): https://ngrok.com/download, or:
+choco install ngrok   # if you use Chocolatey
+# Sign up for a free account at ngrok.com, then:
+ngrok config add-authtoken <your-token-from-the-ngrok-dashboard>
+```
+
+With the backend running on port 4000 (Section 1.7), in a separate
+terminal:
+
+```bash
+ngrok http 4000
+```
+
+This prints a `Forwarding` line like:
+
+```
+Forwarding    https://abcd-1-2-3-4.ngrok-free.app -> http://localhost:4000
+```
+
+That `https://...ngrok-free.app` URL is your public backend URL for this
+session - **it changes every time you restart ngrok** on the free tier,
+so you'll need to redo steps 4.3/4.4 below whenever that happens.
+
+Sanity check from any device/browser: `https://abcd-....ngrok-free.app/health`
+should return the same JSON as the local `curl` check in Section 1.8.
+
+### 4.3 Point the mobile app at the ngrok URL
+
+Edit `mobile/.env`'s `EXPO_PUBLIC_BACKEND_URL` to the ngrok URL from 4.2,
+then restart `npx expo start` (Section 3.2) so it picks up the change.
+
+### 4.4 Register the webhook URL in PaySharp's dashboard
+
+Log into `https://sandbox.paysharp.co.in/client-admin` -> Settings /
+Configuration -> Webhook URL, and set it to:
+
+```
+https://abcd-1-2-3-4.ngrok-free.app/webhooks/paysharp?secret=4c7a55b7c0dc107496eb25a5fb7cebd85b6246eb953f24dab34ad783ba709f5c
+```
+
+(replace the `abcd-1-2-3-4...` part with your actual ngrok URL from 4.2;
+keep the `?secret=...` value exactly matching `PAYSHARP_WEBHOOK_SECRET` in
+`backend/.env`). Also check whether the dashboard has a separate "retry
+configuration" setting - leave it at whatever default it offers unless
+you have a reason to change it.
+
+### 4.5 Regenerate the API token if needed
+
+PaySharp sandbox tokens expire after about a day. If `backend/.env`'s
+`PAYSHARP_API_TOKEN` is more than a day old, generate a fresh one from the
+same dashboard (Settings/Configuration) and update `backend/.env`, then
+restart the backend (Section 1.7).
+
+### 4.6 The actual test walkthrough
+
+1. On your phone (Expo Go), log in as `resident@society.app` / `password`.
+2. Go to Pay Maintenance (or Water Charges), enter an amount, and tap
+   **"\u26A1 Instant UPI Payment"**.
+3. Your phone's UPI app (Google Pay, PhonePe, etc.) should open with the
+   amount and a merchant name pre-filled. **Read the important caveat in
+   Section 4.7 before assuming the payment itself will go through.**
+4. Back in the app, you'll see a "Waiting for payment confirmation..."
+   screen that checks automatically every few seconds (or tap "Check now").
+5. If the webhook fires (see 4.7 for how to make that happen in sandbox),
+   the app should flip to "Payment confirmed" within a few seconds, and
+   the underlying billing period should show as paid in the app.
+
+### 4.7 IMPORTANT: sandbox payments likely won't complete via a real UPI app
+
+PaySharp's sandbox environment gives your merchant account a **sandbox
+merchant VPA** (visible in the intent link as the `pa=` parameter) that is
+almost certainly not a real, resolvable account on the actual UPI/NPCI
+network. A real, production Google Pay/PhonePe app talks to the real
+banking network - it does not know about PaySharp's sandbox. So:
+
+- **The deep link opening the right app with the right amount** - this
+  IS a real, meaningful test of our own integration code, and should work.
+- **Actually completing the payment inside that app** (entering your UPI
+  PIN) will likely fail with something like "invalid payee" - this is
+  expected, not a bug in our code, and is not something we can fix from
+  the client side.
+
+To actually get a webhook/status SUCCESS to test the rest of the flow
+(auto-verify, billing period closing, etc.), use one of:
+- **Check the PaySharp dashboard** for a "simulate payment" feature on the
+  order you just created (their own marketing page mentions "simulate
+  payments from the sandbox environment" - look for it under the order's
+  own detail view once you find where sandbox orders are listed).
+- **Or craft the webhook call directly yourself**, exactly like
+  `backend/scripts/test-paysharp-upi-intent.js` already does successfully
+  end-to-end - e.g. with `curl`:
+
+```bash
+curl -X POST "https://abcd-1-2-3-4.ngrok-free.app/webhooks/paysharp?secret=4c7a55b7c0dc107496eb25a5fb7cebd85b6246eb953f24dab34ad783ba709f5c" \
+  -H "content-type: application/json" \
+  -d "{\"orderId\": \"<the paysharp_order_id from the app or Table Editor>\", \"status\": \"SUCCESS\", \"amount\": 2200, \"utrNumber\": \"MANUALSIMTEST1\"}"
+```
+
+(find the real `orderId` either from the app's own waiting screen network
+activity, from Supabase Studio's Table Editor on the `transactions` row
+you just created, or by checking the backend's own terminal logs).
+
+## 5. iPhone vs Android for This Testing
+
+**Android** works out of the box in plain Expo Go - the app already opens
+`upi://...` deep links directly (`Linking.openURL`) with no extra native
+configuration needed; Android resolves it via the system's own UPI-app
+chooser.
+
+**iPhone is more work.** iOS requires every custom URL scheme
+(`upi`, `tez`, `phonepe`, `paytmmp`, etc.) to be explicitly declared under
+`LSApplicationQueriesSchemes` in the native `Info.plist` before
+`Linking.openURL`/`canOpenURL` can find or open any UPI app at all -
+without that declaration, the call silently fails to open anything. Plain
+**Expo Go does not include those declarations** (it's a generic sandbox
+app, not aware of PaySharp/UPI apps specifically), so the Instant UPI
+Payment button's deep-link step will likely not visibly open anything on
+an iPhone running Expo Go, even though the order itself was created
+successfully on PaySharp's side (check the app's own waiting screen and
+the "Open Google Pay"/"Open PhonePe" buttons on it - those try the same
+thing and will have the same limitation).
+
+To get the actual "deep link opens a UPI app" behavior on iPhone, you'd
+need a **custom Expo Dev Client build** (via `eas build --profile
+development --platform ios`) with those schemes added to `app.json`'s
+`ios.infoPlist.LSApplicationQueriesSchemes`, which in turn needs:
+- An Apple ID (a free one can do ad-hoc/internal builds, but with the app
+  expiring after ~7 days without a paid $99/year Apple Developer Program
+  membership).
+- An EAS account (free tier available) and ~15-30 minutes for the first
+  build.
+
+Given the sandbox-VPA limitation in Section 4.7 means the payment likely
+won't complete for real on *either* platform anyway, the pragmatic
+recommendation is:
+
+- **If you have any Android device or emulator available**, use it for
+  the "does the deep link actually open the right app with the right
+  amount" visual check - it just works, no extra setup.
+- **On iPhone**, everything up through order creation, the waiting
+  screen, and the simulated-webhook completion (Section 4.7's `curl`
+  method) is fully testable right now, in plain Expo Go, with no extra
+  setup - only the "app visibly opens" moment itself needs the dev-client
+  detour above, and given it likely wouldn't complete a real payment
+  anyway even if it did open, that detour may not be worth doing right
+  now unless you specifically want to confirm the deep link's shape is
+  correct.
+
+## 6. Postman Testing (backend only, no mobile app needed)
+
+### 6.1 Create an environment
+
+In Postman, create an environment (e.g. "Society App Local") with one
+variable: `base_url` = `http://localhost:4000` (or your ngrok URL). Use
+`{{base_url}}` in every request URL below.
+
+### 6.2 Login
+
+- **Method/URL:** `POST {{base_url}}/auth/login`
+- **Body (raw JSON):** `{"email": "resident@society.app", "password": "password"}`
+- **Tests tab** (auto-saves the token):
+```javascript
+const json = pm.response.json();
+pm.environment.set("access_token", json.access_token);
+```
+
+### 6.3 Create a PaySharp intent order
+
+- **Method/URL:** `POST {{base_url}}/transactions/upi-intent`
+- **Auth:** Bearer Token, `{{access_token}}`
+- **Body (raw JSON):**
+```json
+{
+  "house_id": "00000006-0000-0000-0000-000000000006",
+  "amount": 2200,
+  "transaction_type": "Maintenance"
+}
+```
+- Expect `201` with `intentUrl`/`gpayUrl`/`phonepeUrl`, `payment_gateway: "paysharp"`, `gateway_status: "PENDING"`.
+
+### 6.4 Poll its status
+
+- **Method/URL:** `GET {{base_url}}/transactions/{{transaction_id}}/status` (save the id from 6.3's response into an environment variable, or paste it directly)
+- **Auth:** Bearer Token, `{{access_token}}`
+- Expect `200`, still `PENDING`/`ON PROGRESS` until something resolves it (Section 4.7).
+
+### 6.5 Clean up test transactions afterward
+
+```sql
+delete from transaction_allocations where transaction_id in (select id from transactions where utr_number like 'MANUALTEST%' or utr_number like 'MANUALSIMTEST%');
+delete from transactions where utr_number like 'MANUALTEST%' or utr_number like 'MANUALSIMTEST%';
+```
+
+## 7. What's Already Done vs. Not Yet Built
+
+Don't maintain a duplicate list here - it always goes stale. Check
+`Society_App_Progress_Log.md`'s dated entries (newest at the bottom) for
+the real, current state of the project.
+
+## 8. Resuming / Logging
+
+Record whatever you find while testing (bugs, questions, blockers) in
+`Society_App_Progress_Log.md` under a new dated section, the same way
+every other session in this project has been logged - including anything
+you learn here about PaySharp's actual sandbox simulate-payment mechanism,
+since that's still an open question as of 2026-09-11.
