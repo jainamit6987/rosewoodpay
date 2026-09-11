@@ -18,6 +18,14 @@ async function request(method, path, accessToken, body) {
       method,
       headers: {
         'Content-Type': 'application/json',
+        // Harmless no-op against the real backend/ngrok - only matters when
+        // EXPO_PUBLIC_BACKEND_URL points at a `loca.lt` (localtunnel)
+        // tunnel, which otherwise intercepts every request with an HTML
+        // "are you sure you want to visit this site" reminder page instead
+        // of proxying it through, breaking every fetch() call's
+        // `response.json()` parse. Left in permanently since it costs
+        // nothing against any other backend.
+        'Bypass-Tunnel-Reminder': 'true',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
