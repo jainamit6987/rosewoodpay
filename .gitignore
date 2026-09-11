@@ -4,6 +4,11 @@
 *.env
 !*.env.example
 
+# PaySharp sandbox/production credentials (dashboard login, API token) -
+# reference notes only, never committed.
+paysharp_sandbox_credentials.txt
+paysharp_production_credentials.txt
+
 # Node
 node_modules/
 npm-debug.log*

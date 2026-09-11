@@ -9,6 +9,7 @@ const housesRoutes = require('./routes/houses');
 const membersRoutes = require('./routes/members');
 const societyRoutes = require('./routes/society');
 const assignmentsRoutes = require('./routes/assignments');
+const paysharpWebhookRoutes = require('./routes/paysharpWebhook');
 
 const app = express();
 app.use(cors());
@@ -25,6 +26,9 @@ app.use('/houses', housesRoutes);
 app.use('/members', membersRoutes);
 app.use('/society', societyRoutes);
 app.use('/assignments', assignmentsRoutes);
+// Not behind authenticate - server-to-server call from PaySharp, protected
+// by its own ?secret= query param instead (see routes/paysharpWebhook.js).
+app.use('/webhooks/paysharp', paysharpWebhookRoutes);
 
 // Confirms the server can reach the linked Supabase project using the
 // service-role key. Does not expose the key or any row data in the response.

@@ -1,6 +1,10 @@
+const crypto = require('crypto');
 const express = require('express');
 const authenticate = require('../middleware/authenticate');
 const supabaseAdmin = require('../config/supabaseAdmin');
+const { closeFullyPaidPeriods } = require('../services/billingPeriods');
+const paysharp = require('../services/paysharp');
+const { applyGatewayOutcome } = require('../services/transactionGateway');
 
 const router = express.Router();
 
@@ -24,6 +28,7 @@ const PG_INSUFFICIENT_PRIVILEGE = '42501';
 // pre-billed like a billing period.
 const TRANSACTION_TYPES = ['Maintenance', 'WaterCharge', 'UtilityBill', 'Salary', 'Other'];
 const MAINTENANCE_TYPE = 'Maintenance';
+const WATER_CHARGE_TYPE = 'WaterCharge';
 const EXPENSE_TYPES = ['UtilityBill', 'Salary', 'Other'];
 const OTHER_TYPE = 'Other';
 
@@ -87,6 +92,183 @@ function startOfCurrentMonthUtc() {
 
 function toDateOnly(date) {
   return date.toISOString().slice(0, 10);
+}
+
+// --- Shared house/allocation helpers ---------------------------------
+// Extracted so the new POST /upi-intent below can reuse the exact same
+// house lookup, active-assignment check, whole-month-multiple rule, and
+// FIFO billing-period allocation as the existing POST / handler, without
+// duplicating ~90 lines of the trickiest logic in this file (concurrent
+// period auto-generation included). Each returns either
+// `{ errorStatus, errorBody }` (caller should respond with those two
+// verbatim) or its own success shape - never both.
+
+async function lookupHouse(supabase, house_id) {
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, society_id, default_monthly_amount')
+    .eq('id', house_id)
+    .maybeSingle();
+
+  if (houseError) {
+    return { errorStatus: 500, errorBody: { error: houseError.message } };
+  }
+  if (!house) {
+    return { errorStatus: 404, errorBody: { error: 'House not found or not accessible.' } };
+  }
+  return { house };
+}
+
+// Explicit assignment check, independent of whether any billing_periods
+// exist yet for this house - a brand-new or fully-caught-up house may have
+// zero periods, and callers still need to distinguish "legitimately
+// nothing to see yet" from "not assigned to this house at all". RLS scopes
+// this to the caller's own assignment (for residents) or any assignment in
+// their society (for admins/committee), so a non-empty result here always
+// means the caller is legitimately allowed to deal with this house.
+async function checkActiveHouseAssignment(supabase, house_id) {
+  const { data: houseAssignments, error: assignmentError } = await supabase
+    .from('resident_house_assignments')
+    .select('id')
+    .eq('house_id', house_id)
+    .eq('status', 'Active')
+    .limit(1);
+
+  if (assignmentError) {
+    return { errorStatus: 500, errorBody: { error: assignmentError.message } };
+  }
+  if (!houseAssignments || houseAssignments.length === 0) {
+    return {
+      errorStatus: 403,
+      errorBody: {
+        error: 'No active house assignment visible for this house. Confirm you have an approved, active assignment to it.',
+      },
+    };
+  }
+  return {};
+}
+
+// Applies the Maintenance-only whole-month-multiple rule, then computes
+// the FIFO billing-period allocation for Maintenance (WaterCharge always
+// returns an empty, unallocated array - see this file's own comment near
+// the transaction_type constants on why it is deliberately "pay-as-you-go"
+// rather than pre-billed like Maintenance).
+async function computeAllocations(supabase, house, transactionType, amount) {
+  if (transactionType === MAINTENANCE_TYPE) {
+    if (!house.default_monthly_amount) {
+      return {
+        errorStatus: 409,
+        errorBody: {
+          error:
+            'This house has no default monthly amount configured, so maintenance payments cannot be validated. Ask an admin to configure a rate first.',
+        },
+      };
+    }
+    if (!isWholeMultiple(amount, Number(house.default_monthly_amount))) {
+      return {
+        errorStatus: 400,
+        errorBody: {
+          error: `Maintenance payments must be a whole-month multiple of the base amount (${house.default_monthly_amount}). Partial-month payments are not allowed - pay for one or more full months (e.g. ${house.default_monthly_amount}, ${2 * house.default_monthly_amount}, ${3 * house.default_monthly_amount}).`,
+        },
+      };
+    }
+  }
+
+  const allocations = [];
+
+  if (transactionType === MAINTENANCE_TYPE) {
+    const { data: housePeriods, error: periodsError } = await supabase
+      .from('billing_periods')
+      .select('id, period_month, status, amount_due')
+      .eq('house_id', house.id)
+      .order('period_month', { ascending: true });
+
+    if (periodsError) {
+      return { errorStatus: 500, errorBody: { error: periodsError.message } };
+    }
+
+    // FIFO allocation across as many sequential periods as this payment
+    // covers: walk the oldest still-Open periods first, consuming each
+    // one's own amount_due from the submitted total (not a flat rate,
+    // since a rate change could mean periods differ), and auto-generate
+    // further periods - using the house's trusted default_monthly_amount,
+    // never the unverified submitted amount - once the existing ones run
+    // out. This one mechanism covers a single month's payment, clearing
+    // several months of arrears in one lump payment, and paying ahead of
+    // schedule.
+    const openPeriods = housePeriods.filter((period) => period.status === 'Open');
+    let cursorMonth = housePeriods.length > 0 ? housePeriods[housePeriods.length - 1].period_month : null;
+
+    let remaining = amount;
+    let index = 0;
+
+    while (remaining > 0) {
+      let period = openPeriods[index];
+
+      if (!period) {
+        if (!house.default_monthly_amount) {
+          break; // out of periods and no rate configured to generate more - handled below
+        }
+
+        const nextMonth = cursorMonth ? addMonths(cursorMonth, 1) : startOfCurrentMonthUtc();
+        const nextMonthDate = toDateOnly(nextMonth);
+
+        const { data: generated, error: generateError } = await supabaseAdmin
+          .from('billing_periods')
+          .insert({
+            society_id: house.society_id,
+            house_id: house.id,
+            period_month: nextMonthDate,
+            base_amount: house.default_monthly_amount,
+            amount_due: house.default_monthly_amount,
+            status: 'Open',
+          })
+          .select('id, period_month, status, amount_due')
+          .single();
+
+        if (generateError) {
+          if (generateError.code === PG_UNIQUE_VIOLATION) {
+            // A concurrent request already generated this exact month for
+            // this house - use it instead of failing.
+            const { data: existing, error: existingError } = await supabaseAdmin
+              .from('billing_periods')
+              .select('id, period_month, status, amount_due')
+              .eq('house_id', house.id)
+              .eq('period_month', nextMonthDate)
+              .single();
+            if (existingError) {
+              return { errorStatus: 500, errorBody: { error: existingError.message } };
+            }
+            period = existing;
+          } else {
+            return { errorStatus: 500, errorBody: { error: generateError.message } };
+          }
+        } else {
+          period = generated;
+        }
+
+        openPeriods.push(period);
+        cursorMonth = period.period_month;
+      }
+
+      const allocate = Math.min(remaining, Number(period.amount_due));
+      allocations.push({ billing_period_id: period.id, amount_allocated: allocate });
+      remaining -= allocate;
+      index += 1;
+    }
+
+    if (remaining > 0) {
+      return {
+        errorStatus: 409,
+        errorBody: {
+          error:
+            'This amount covers more than the periods available, and no default monthly amount is configured on this house to generate further ones. Ask an admin to configure a rate.',
+        },
+      };
+    }
+  }
+
+  return { allocations };
 }
 
 router.post('/', authenticate, async (req, res) => {
@@ -291,18 +473,11 @@ router.post('/', authenticate, async (req, res) => {
 
   // society_id is derived from the house, never trusted from the request
   // body, so a caller cannot submit into a society they are not a member of.
-  const { data: house, error: houseError } = await supabase
-    .from('houses')
-    .select('id, society_id, default_monthly_amount')
-    .eq('id', house_id)
-    .maybeSingle();
-
-  if (houseError) {
-    return res.status(500).json({ error: houseError.message });
+  const houseResult = await lookupHouse(supabase, house_id);
+  if (houseResult.errorStatus) {
+    return res.status(houseResult.errorStatus).json(houseResult.errorBody);
   }
-  if (!house) {
-    return res.status(404).json({ error: 'House not found or not accessible.' });
-  }
+  const { house } = houseResult;
 
   // Cash is deliberately Admin-only, not Committee - the same authorization
   // level as /:id/verify itself (see loadTransactionAndCheckAdmin below),
@@ -339,135 +514,23 @@ router.post('/', authenticate, async (req, res) => {
   // the caller's own assignment (for residents) or any assignment in their
   // society (for admins/committee), so a non-empty result here always
   // means the caller is legitimately allowed to deal with this house.
-  const { data: houseAssignments, error: assignmentError } = await supabase
-    .from('resident_house_assignments')
-    .select('id')
-    .eq('house_id', house_id)
-    .eq('status', 'Active')
-    .limit(1);
-
-  if (assignmentError) {
-    return res.status(500).json({ error: assignmentError.message });
-  }
-  if (!houseAssignments || houseAssignments.length === 0) {
-    return res.status(403).json({
-      error: 'No active house assignment visible for this house. Confirm you have an approved, active assignment to it.',
-    });
+  const assignmentResult = await checkActiveHouseAssignment(supabase, house_id);
+  if (assignmentResult.errorStatus) {
+    return res.status(assignmentResult.errorStatus).json(assignmentResult.errorBody);
   }
 
-  // Base-amount-multiple rule: a Maintenance payment must cover one or more
-  // *whole* months, never a fraction of one - e.g. 1x or 2x the base rate is
-  // fine, 1.5x is rejected outright, before any period lookup/generation
-  // happens. Non-Maintenance types (utility bills, salaries, once that
-  // feature exists) have no monthly "base amount" to be a multiple of, so
-  // they are exempt entirely.
-  if (resolvedTransactionType === MAINTENANCE_TYPE) {
-    if (!house.default_monthly_amount) {
-      return res.status(409).json({
-        error: 'This house has no default monthly amount configured, so maintenance payments cannot be validated. Ask an admin to configure a rate first.',
-      });
-    }
-    if (!isWholeMultiple(amount, Number(house.default_monthly_amount))) {
-      return res.status(400).json({
-        error: `Maintenance payments must be a whole-month multiple of the base amount (${house.default_monthly_amount}). Partial-month payments are not allowed - pay for one or more full months (e.g. ${house.default_monthly_amount}, ${2 * house.default_monthly_amount}, ${3 * house.default_monthly_amount}).`,
-      });
-    }
-  }
-
+  // Base-amount-multiple rule (Maintenance only) plus the FIFO
+  // billing-period allocation - see computeAllocations above.
   // WaterCharge deliberately never touches billing_periods at all - see
   // 20260803000000_add_water_charge_transaction_type.sql's own comment on
-  // why this is "pay-as-you-go" rather than pre-billed like Maintenance.
+  // why this is "pay-as-you-go" rather than pre-billed like Maintenance -
   // allocations stays empty for it, all the way through to the
   // transaction_allocations insert below (skipped entirely when empty).
-  let allocations = [];
-
-  if (resolvedTransactionType === MAINTENANCE_TYPE) {
-    const { data: housePeriods, error: periodsError } = await supabase
-      .from('billing_periods')
-      .select('id, period_month, status, amount_due')
-      .eq('house_id', house_id)
-      .order('period_month', { ascending: true });
-
-    if (periodsError) {
-      return res.status(500).json({ error: periodsError.message });
-    }
-
-    // FIFO allocation across as many sequential periods as this payment
-    // covers: walk the oldest still-Open periods first, consuming each one's
-    // own amount_due from the submitted total (not a flat rate, since a rate
-    // change could mean periods differ), and auto-generate further periods -
-    // using the house's trusted default_monthly_amount, never the unverified
-    // submitted amount - once the existing ones run out. This one mechanism
-    // covers a single month's payment, clearing several months of arrears in
-    // one lump payment, and paying ahead of schedule.
-    const openPeriods = housePeriods.filter((period) => period.status === 'Open');
-    let cursorMonth = housePeriods.length > 0 ? housePeriods[housePeriods.length - 1].period_month : null;
-
-    let remaining = amount;
-    let index = 0;
-
-    while (remaining > 0) {
-      let period = openPeriods[index];
-
-      if (!period) {
-        if (!house.default_monthly_amount) {
-          break; // out of periods and no rate configured to generate more - handled below
-        }
-
-        const nextMonth = cursorMonth ? addMonths(cursorMonth, 1) : startOfCurrentMonthUtc();
-        const nextMonthDate = toDateOnly(nextMonth);
-
-        const { data: generated, error: generateError } = await supabaseAdmin
-          .from('billing_periods')
-          .insert({
-            society_id: house.society_id,
-            house_id,
-            period_month: nextMonthDate,
-            base_amount: house.default_monthly_amount,
-            amount_due: house.default_monthly_amount,
-            status: 'Open',
-          })
-          .select('id, period_month, status, amount_due')
-          .single();
-
-        if (generateError) {
-          if (generateError.code === PG_UNIQUE_VIOLATION) {
-            // A concurrent request already generated this exact month for
-            // this house - use it instead of failing.
-            const { data: existing, error: existingError } = await supabaseAdmin
-              .from('billing_periods')
-              .select('id, period_month, status, amount_due')
-              .eq('house_id', house_id)
-              .eq('period_month', nextMonthDate)
-              .single();
-            if (existingError) {
-              return res.status(500).json({ error: existingError.message });
-            }
-            period = existing;
-          } else {
-            return res.status(500).json({ error: generateError.message });
-          }
-        } else {
-          period = generated;
-        }
-
-        openPeriods.push(period);
-        cursorMonth = period.period_month;
-      }
-
-      const allocate = Math.min(remaining, Number(period.amount_due));
-      allocations.push({ billing_period_id: period.id, amount_allocated: allocate });
-      remaining -= allocate;
-      index += 1;
-    }
-
-    if (remaining > 0) {
-      return res.status(409).json({
-        error:
-          'This amount covers more than the periods available, and no default monthly amount is configured on this house to generate further ones. Ask an admin to configure a rate.',
-      });
-    }
+  const allocationsResult = await computeAllocations(supabase, house, resolvedTransactionType, amount);
+  if (allocationsResult.errorStatus) {
+    return res.status(allocationsResult.errorStatus).json(allocationsResult.errorBody);
   }
+  const allocations = allocationsResult.allocations;
 
   // Cash is auto-Verified at insert time, same as the society-expense
   // branch above and for the same reason: the Admin recording it (checked
@@ -594,6 +657,195 @@ router.post('/', authenticate, async (req, res) => {
   }
 
   res.status(201).json({ ...transaction, allocations: insertedAllocations });
+});
+
+// Backend-initiated PaySharp UPI Intent order - the automated-confirmation
+// counterpart to POST /'s manual "build a upi://pay link ourselves +
+// resident types the UTR" flow, per PAYSHARP_UPI_INTENT_INTEGRATION_PLAN.md.
+// Maintenance/WaterCharge only - Cash and the society-expense types
+// (UtilityBill/Salary/Other) don't apply here at all, since there is no
+// "gateway payment" concept for either (Cash has no UPI leg; expenses are
+// the society paying someone else, not a resident paying in). Reuses the
+// exact same house lookup, active-assignment check, and (for Maintenance)
+// whole-month-multiple validation + FIFO allocation as POST / above via
+// the shared helpers, so the two paths can never validate a submission
+// differently.
+router.post('/upi-intent', authenticate, async (req, res) => {
+  const { house_id, amount, transaction_type, customer_mobile_no, customer_name, customer_email } = req.body || {};
+
+  if (amount === undefined || amount === null) {
+    return res.status(400).json({ error: 'amount is required.' });
+  }
+  if (typeof amount !== 'number' || amount <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number.' });
+  }
+
+  const resolvedTransactionType = transaction_type || MAINTENANCE_TYPE;
+  if (![MAINTENANCE_TYPE, WATER_CHARGE_TYPE].includes(resolvedTransactionType)) {
+    return res.status(400).json({
+      error: `transaction_type must be one of: ${MAINTENANCE_TYPE}, ${WATER_CHARGE_TYPE}. A PaySharp UPI Intent order is only for a resident paying the society, not Cash or a society expense.`,
+    });
+  }
+
+  if (!house_id) {
+    return res.status(400).json({ error: `house_id is required for ${resolvedTransactionType} payments.` });
+  }
+
+  const supabase = req.supabase;
+
+  const houseResult = await lookupHouse(supabase, house_id);
+  if (houseResult.errorStatus) {
+    return res.status(houseResult.errorStatus).json(houseResult.errorBody);
+  }
+  const { house } = houseResult;
+
+  const assignmentResult = await checkActiveHouseAssignment(supabase, house_id);
+  if (assignmentResult.errorStatus) {
+    return res.status(assignmentResult.errorStatus).json(assignmentResult.errorBody);
+  }
+
+  const allocationsResult = await computeAllocations(supabase, house, resolvedTransactionType, amount);
+  if (allocationsResult.errorStatus) {
+    return res.status(allocationsResult.errorStatus).json(allocationsResult.errorBody);
+  }
+  const allocations = allocationsResult.allocations;
+
+  // The caller's own society_members row in this house's society - source
+  // of the customerName/customerMobileNo fallback PaySharp needs, and of
+  // `customerId`. Deliberately the CALLER's own membership, not the
+  // house's - this endpoint is for a resident paying via their own phone
+  // (the intent link opens on whichever device calls this), so an Admin
+  // wanting to record a payment on a different resident's behalf should
+  // keep using the manual POST / flow, not this one.
+  const { data: membership, error: membershipError } = await supabase
+    .from('society_members')
+    .select('id, name, phone_number')
+    .eq('auth_user_id', req.user.id)
+    .eq('society_id', house.society_id)
+    .eq('status', 'Active')
+    .maybeSingle();
+
+  if (membershipError) {
+    return res.status(500).json({ error: membershipError.message });
+  }
+  if (!membership) {
+    return res.status(403).json({ error: "No active membership found for you in this house's society." });
+  }
+
+  // PaySharp requires exactly 10 digits - strips anything else (spaces,
+  // +91, dashes) and takes the last 10, same normalization a resident's
+  // pasted-in number would typically need. phone_number is optional/
+  // self-service (see 20260725010000_add_phone_number_to_society_members.sql)
+  // so it will not always be on file - callers can pass customer_mobile_no
+  // explicitly to cover that gap (e.g. a one-time prompt in the mobile UI).
+  const rawMobileNo = customer_mobile_no || membership.phone_number || '';
+  const resolvedMobileNo = String(rawMobileNo).replace(/\D/g, '').slice(-10);
+  if (resolvedMobileNo.length !== 10) {
+    return res.status(400).json({
+      error:
+        'A 10-digit customer_mobile_no is required by PaySharp and none is on file for you. Pass customer_mobile_no in the request body, or ask an admin to set your phone number first.',
+    });
+  }
+
+  // Checked here - after every validation that only depends on our own
+  // data, but before anything PaySharp-specific (order id, the actual API
+  // call) - so a request with genuinely bad input still gets its real 400/
+  // 403/404/409 even while PaySharp itself is unconfigured (e.g. this
+  // sandbox, before credentials exist), and a misconfigured backend still
+  // fails cleanly for an otherwise-valid request instead of a confusing
+  // failure partway through order creation.
+  if (!paysharp.isConfigured()) {
+    return res.status(503).json({
+      error:
+        'PaySharp is not configured on this backend (PAYSHARP_BASE_URL/PAYSHARP_API_TOKEN missing). Use the manual UPI flow (POST /transactions) instead.',
+    });
+  }
+
+  // Ours, unique, max 36 chars per PaySharp's own limit - a
+  // crypto.randomUUID() fits exactly and doubles as `remarks` (their
+  // "recommend passing orderId/invoiceId" guidance), truncated to their
+  // 35-char remarks limit (one less than orderId's own 36).
+  const orderId = crypto.randomUUID();
+
+  let intentOrder;
+  try {
+    intentOrder = await paysharp.createIntentOrder({
+      orderId,
+      amount,
+      customerId: membership.id,
+      customerName: customer_name || membership.name || undefined,
+      customerMobileNo: resolvedMobileNo,
+      customerEmail: customer_email || req.user.email || undefined,
+      remarks: orderId.slice(0, 35),
+    });
+  } catch (err) {
+    return res.status(502).json({ error: `PaySharp order creation failed: ${err.message}` });
+  }
+
+  const { data: transaction, error: insertError } = await supabase
+    .from('transactions')
+    .insert({
+      society_id: house.society_id,
+      house_id,
+      submitted_by: req.user.id,
+      amount,
+      transaction_type: resolvedTransactionType,
+      direction: 'Cr', // Maintenance/WaterCharge are always a resident paying the society - see DIRECTIONS comment above.
+      payment_mode: 'UPI',
+      payment_gateway: 'paysharp',
+      paysharp_order_id: orderId,
+      paysharp_reference_no: intentOrder.paysharpReferenceNo || null,
+      gateway_status: 'PENDING',
+    })
+    .select()
+    .single();
+
+  if (insertError) {
+    // The PaySharp order already exists at this point (orphaned from our
+    // side, but harmless - it will simply expire unpaid, or a paid one can
+    // be manually reconciled via paysharp_order_id below). Surfaced with
+    // the order id so support can find it either way.
+    if (insertError.code === PG_INSUFFICIENT_PRIVILEGE || insertError.message?.includes('row-level security')) {
+      return res.status(403).json({
+        error: 'Not allowed to submit for this house. It must be an approved, active house assignment.',
+      });
+    }
+    return res.status(500).json({
+      error: `PaySharp order ${orderId} was created but recording the transaction failed: ${insertError.message}. Contact support with this order id.`,
+    });
+  }
+
+  // Same "skip insert entirely when empty" reasoning as POST / above -
+  // allocations is always empty for WaterCharge.
+  let insertedAllocations = [];
+  if (allocations.length > 0) {
+    const { data, error: allocationError } = await supabase
+      .from('transaction_allocations')
+      .insert(
+        allocations.map((allocation) => ({
+          transaction_id: transaction.id,
+          billing_period_id: allocation.billing_period_id,
+          amount_allocated: allocation.amount_allocated,
+        }))
+      )
+      .select();
+
+    if (allocationError) {
+      return res.status(500).json({
+        error: `Transaction recorded but allocation failed: ${allocationError.message}`,
+        transaction,
+      });
+    }
+    insertedAllocations = data;
+  }
+
+  res.status(201).json({
+    ...transaction,
+    allocations: insertedAllocations,
+    intentUrl: intentOrder.intentUrl,
+    gpayUrl: intentOrder.gpayUrl,
+    phonepeUrl: intentOrder.phonepeUrl,
+  });
 });
 
 // Admin/Committee dashboard feed: every Submitted transaction across every
@@ -868,61 +1120,82 @@ async function loadTransactionAndCheckAdmin(supabase, userId, transactionId) {
   return { transaction, isAdmin: !!adminMembership };
 }
 
-// After marking a transaction Verified, checks every billing period it has
-// an allocation against and closes any period whose *total* verified
-// allocations (across every transaction that has ever paid into it, not
-// just this one - a period can in principle be topped up by more than one
-// payment) now cover its amount_due. Left as "Open" if still short, so a
-// partial/underpayment does not incorrectly close a period.
-async function closeFullyPaidPeriods(supabase, billingPeriodIds) {
-  const closedPeriods = [];
+// closeFullyPaidPeriods now lives in services/billingPeriods.js (imported
+// at the top of this file) - extracted so the new PaySharp gateway-outcome
+// path (services/transactionGateway.js) can reuse it without duplicating
+// this logic. Behavior is unchanged.
 
-  for (const billingPeriodId of billingPeriodIds) {
-    const { data: period, error: periodError } = await supabase
-      .from('billing_periods')
-      .select('id, status, amount_due')
-      .eq('id', billingPeriodId)
-      .maybeSingle();
+// Polling fallback/reconciliation check for a PaySharp gateway order,
+// alongside their webhook (routes/paysharpWebhook.js) - what lets the
+// mobile app confirm a payment even when no public webhook is reachable
+// yet (local/dev testing), and doubles as a safety net in production too
+// (see PAYSHARP_UPI_INTENT_INTEGRATION_PLAN.md). Available to anyone who
+// can already see this transaction (the resident who submitted it, a
+// co-assignee of the same house, or an Admin/Committee member of its
+// society) - same visibility every other transaction read already has,
+// nothing gateway-specific about who may check on it.
+router.get('/:id/status', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id } = req.params;
 
-    if (periodError) throw new Error(periodError.message);
-    if (!period || period.status !== 'Open') continue; // already Closed/Waived - nothing to do
+  // RLS-scoped read first - both confirms the caller can actually see this
+  // transaction and gives a clean 404 rather than leaking existence
+  // otherwise, before any PaySharp call is made.
+  const { data: transaction, error: transactionError } = await supabase
+    .from('transactions')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
 
-    const { data: allocations, error: allocationsError } = await supabase
-      .from('transaction_allocations')
-      .select('amount_allocated, transaction_id')
-      .eq('billing_period_id', billingPeriodId);
-
-    if (allocationsError) throw new Error(allocationsError.message);
-
-    const transactionIds = [...new Set((allocations || []).map((a) => a.transaction_id))];
-    if (transactionIds.length === 0) continue;
-
-    const { data: verifiedTransactions, error: verifiedError } = await supabase
-      .from('transactions')
-      .select('id')
-      .in('id', transactionIds)
-      .eq('processing_status', 'Verified');
-
-    if (verifiedError) throw new Error(verifiedError.message);
-
-    const verifiedIds = new Set((verifiedTransactions || []).map((t) => t.id));
-    const verifiedTotal = (allocations || [])
-      .filter((a) => verifiedIds.has(a.transaction_id))
-      .reduce((sum, a) => sum + Number(a.amount_allocated), 0);
-
-    if (verifiedTotal >= Number(period.amount_due)) {
-      const { error: closeError } = await supabase
-        .from('billing_periods')
-        .update({ status: 'Closed' })
-        .eq('id', billingPeriodId);
-
-      if (closeError) throw new Error(closeError.message);
-      closedPeriods.push(billingPeriodId);
-    }
+  if (transactionError) {
+    return res.status(500).json({ error: transactionError.message });
+  }
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transaction not found or not accessible.' });
   }
 
-  return closedPeriods;
-}
+  // Already terminal, or not a gateway-owned row at all (self-reported
+  // UPI/Cash/expense) - nothing to poll, return as-is.
+  if (['Verified', 'Rejected'].includes(transaction.processing_status)) {
+    return res.json(transaction);
+  }
+  if (transaction.payment_gateway !== 'paysharp' || !transaction.paysharp_order_id) {
+    return res.json(transaction);
+  }
+
+  if (!paysharp.isConfigured()) {
+    return res.status(503).json({
+      error: 'PaySharp is not configured on this backend right now, so its status cannot be polled.',
+      transaction,
+    });
+  }
+
+  let gatewayData;
+  try {
+    gatewayData = await paysharp.getOrderStatus(transaction.paysharp_order_id);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not reach PaySharp for order status: ${err.message}`, transaction });
+  }
+
+  // Uses supabaseAdmin, not the caller's RLS-scoped client, same reasoning
+  // as the webhook path - applying a SUCCESS outcome auto-Verifies the
+  // transaction, a privilege a resident polling their own payment does not
+  // otherwise have (only an Admin can normally call POST /:id/verify).
+  // Visibility was already confirmed by the RLS-scoped read above, so this
+  // does not leak anything the caller could not already see.
+  try {
+    const { transaction: updated } = await applyGatewayOutcome(supabaseAdmin, {
+      orderId: transaction.paysharp_order_id,
+      ...gatewayData,
+    });
+    return res.json(updated || transaction);
+  } catch (err) {
+    return res.status(500).json({
+      error: `Fetched PaySharp status but applying it failed: ${err.message}`,
+      transaction,
+    });
+  }
+});
 
 // Admin-only: confirms a submitted payment is real (matches a genuine bank
 // settlement, as far as the admin can tell from the UTR/receipt) and closes

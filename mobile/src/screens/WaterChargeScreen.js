@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -91,6 +92,12 @@ export default function WaterChargeScreen({ house, society, onBack }) {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [historyError, setHistoryError] = useState(null);
+  const [mobileNoInput, setMobileNoInput] = useState('');
+
+  // Same "instant" PaySharp UPI Intent flow as SubmitPaymentScreen's own -
+  // see usePaysharpPayment's own comment for why this is shared rather than
+  // duplicated per-screen.
+  const paysharp = usePaysharpPayment({ accessToken, house, transactionType: 'WaterCharge' });
 
   const loadHistory = useCallback(async () => {
     try {
@@ -106,10 +113,39 @@ export default function WaterChargeScreen({ house, society, onBack }) {
     loadHistory().finally(() => setLoadingHistory(false));
   }, [loadHistory]);
 
+  // Once PaySharp reports SUCCESS (via the webhook or this hook's own
+  // polling fallback - either way `applyGatewayOutcome` already Verified
+  // the row on the backend by this point), refresh the history list so the
+  // new Verified row shows up and clear the amount field, the same way a
+  // completed self-report submission already does. `paysharp.state` itself
+  // stays 'verified' (not auto-reset) so the success banner below persists
+  // the same way `submitResult` already does - it only clears the next
+  // time `paysharp.start()` runs for a new payment.
+  const [verifiedHandled, setVerifiedHandled] = useState(false);
+  useEffect(() => {
+    if (paysharp.state === 'verified' && !verifiedHandled) {
+      setVerifiedHandled(true);
+      setAmount('');
+      loadHistory();
+    } else if (paysharp.state !== 'verified' && verifiedHandled) {
+      setVerifiedHandled(false);
+    }
+  }, [paysharp.state, verifiedHandled, loadHistory]);
+
   const handleRefresh = async () => {
     setRefreshing(true);
     await loadHistory();
     setRefreshing(false);
+  };
+
+  const handleStartInstantPay = () => {
+    const parsedAmount = Number(amount);
+    if (!parsedAmount || parsedAmount <= 0) {
+      setSubmitError('Enter a valid amount before starting an instant UPI payment.');
+      return;
+    }
+    setSubmitError(null);
+    paysharp.start(parsedAmount);
   };
 
   const handlePayViaUpi = async () => {
@@ -193,53 +229,159 @@ export default function WaterChargeScreen({ house, society, onBack }) {
           {submitResult ? (
             <View style={styles.successBox}>
               <Text style={styles.successText}>
-                Submitted \u2713 It will show as Verified once an admin confirms it.
+                {'Submitted \u2713 It will show as Verified once an admin confirms it.'}
               </Text>
             </View>
           ) : null}
 
-          <Text style={styles.label}>Amount</Text>
-          <TextInput
-            style={styles.input}
-            keyboardType="decimal-pad"
-            value={amount}
-            onChangeText={setAmount}
-            editable={!submitting}
-            placeholder="e.g. 300"
-          />
+          {paysharp.state === 'verified' ? (
+            <View style={styles.successBox}>
+              <Text style={styles.successText}>{'Instant payment confirmed \u2713 Already Verified.'}</Text>
+            </View>
+          ) : null}
 
-          <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
-            <Text style={styles.upiButtonText}>Pay via UPI app</Text>
-          </TouchableOpacity>
+          {paysharp.state === 'rejected' ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorBoxText}>
+                Payment failed:{' '}
+                {paysharp.transaction?.gateway_failure_reason || paysharp.transaction?.rejection_reason || 'Unknown reason.'}
+              </Text>
+              <TouchableOpacity onPress={paysharp.reset}>
+                <Text style={styles.tryAgainLink}>Try again</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
 
-          <Text style={styles.label}>UTR / reference number</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 402512345678"
-            autoCapitalize="characters"
-            value={utrNumber}
-            onChangeText={setUtrNumber}
-            editable={!submitting}
-          />
+          {['creating', 'waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
+            <View style={styles.waitingBox}>
+              {paysharp.state !== 'timeout' ? <ActivityIndicator size="small" color="#1a73e8" /> : null}
+              <Text style={styles.waitingTitle}>
+                {paysharp.state === 'creating'
+                  ? 'Creating your payment request\u2026'
+                  : paysharp.state === 'timeout'
+                  ? "Still haven't heard back"
+                  : 'Waiting for payment confirmation\u2026'}
+              </Text>
+              <Text style={styles.waitingSubtitle}>
+                {paysharp.state === 'creating'
+                  ? 'Just a moment.'
+                  : paysharp.state === 'timeout'
+                  ? 'If you completed the payment, tap Check again.'
+                  : 'Complete the payment in your UPI app, then come back here.'}
+              </Text>
+              {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
+                <>
+                  <TouchableOpacity style={styles.submitButton} onPress={paysharp.checkNow}>
+                    <Text style={styles.submitButtonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
+                  </TouchableOpacity>
+                  <View style={styles.appRow}>
+                    <TouchableOpacity
+                      style={styles.appButton}
+                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.gpayUrl)}
+                    >
+                      <Text style={styles.appButtonText}>Open Google Pay</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.appButton}
+                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.phonepeUrl)}
+                    >
+                      <Text style={styles.appButtonText}>Open PhonePe</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : null}
+              {paysharp.error ? <Text style={styles.error}>{paysharp.error}</Text> : null}
+              <TouchableOpacity onPress={paysharp.reset}>
+                <Text style={styles.tryAgainLink}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.label}>Amount</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={amount}
+                onChangeText={setAmount}
+                editable={!submitting}
+                placeholder="e.g. 300"
+              />
 
-          <Text style={styles.label}>Note (optional)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. extra water tanker in July"
-            value={description}
-            onChangeText={setDescription}
-            editable={!submitting}
-          />
+              <TouchableOpacity style={styles.instantButton} onPress={handleStartInstantPay} disabled={submitting}>
+                <Text style={styles.instantButtonText}>{'\u26A1 Instant UPI Payment'}</Text>
+              </TouchableOpacity>
+              <Text style={styles.instantHint}>
+                Opens your UPI app with the amount already filled in - confirms automatically once paid.
+              </Text>
 
-          {submitError ? <Text style={styles.error}>{submitError}</Text> : null}
+              {paysharp.needsMobileNo ? (
+                <View style={styles.successBox}>
+                  <Text style={styles.cardTitle}>We need a mobile number on file to use Instant UPI Payment.</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="phone-pad"
+                    placeholder="10-digit mobile number"
+                    value={mobileNoInput}
+                    onChangeText={setMobileNoInput}
+                  />
+                  <TouchableOpacity
+                    style={styles.submitButton}
+                    onPress={() => {
+                      const parsedAmount = Number(amount);
+                      if (!parsedAmount || parsedAmount <= 0) {
+                        setSubmitError('Enter a valid amount first.');
+                        return;
+                      }
+                      paysharp.start(parsedAmount, { customer_mobile_no: mobileNoInput.trim() });
+                    }}
+                  >
+                    <Text style={styles.submitButtonText}>Continue</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
-          <TouchableOpacity
-            style={[styles.submitButton, submitting && styles.submitButtonDisabled]}
-            onPress={handleSubmit}
-            disabled={submitting}
-          >
-            {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitButtonText}>Submit payment</Text>}
-          </TouchableOpacity>
+              <Text style={styles.orDivider}>
+                {'\u2014 or pay to the society\u2019s own UPI ID and report it yourself \u2014'}
+              </Text>
+
+              <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
+                <Text style={styles.upiButtonText}>Pay via UPI app</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {['creating', 'waiting', 'polling', 'timeout'].includes(paysharp.state) ? null : (
+            <>
+              <Text style={styles.label}>UTR / reference number</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. 402512345678"
+                autoCapitalize="characters"
+                value={utrNumber}
+                onChangeText={setUtrNumber}
+                editable={!submitting}
+              />
+
+              <Text style={styles.label}>Note (optional)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. extra water tanker in July"
+                value={description}
+                onChangeText={setDescription}
+                editable={!submitting}
+              />
+
+              {submitError ? <Text style={styles.error}>{submitError}</Text> : null}
+
+              <TouchableOpacity
+                style={[styles.submitButton, submitting && styles.submitButtonDisabled]}
+                onPress={handleSubmit}
+                disabled={submitting}
+              >
+                {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitButtonText}>Submit payment</Text>}
+              </TouchableOpacity>
+            </>
+          )}
         </View>
 
         <Text style={styles.sectionHeader}>History</Text>
@@ -359,6 +501,85 @@ const styles = StyleSheet.create({
   upiButtonText: {
     color: '#1a73e8',
     fontWeight: '600',
+  },
+  instantButton: {
+    backgroundColor: '#1a73e8',
+    borderRadius: 8,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  instantButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  instantHint: {
+    fontSize: 12,
+    color: '#6e6e73',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  orDivider: {
+    fontSize: 12,
+    color: '#999',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  waitingBox: {
+    backgroundColor: '#f5f6f8',
+    borderRadius: 8,
+    padding: 16,
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  waitingTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1c1c1e',
+  },
+  waitingSubtitle: {
+    fontSize: 13,
+    color: '#6e6e73',
+    textAlign: 'center',
+  },
+  appRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+    width: '100%',
+  },
+  appButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#1a73e8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  appButtonText: {
+    color: '#1a73e8',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  errorBox: {
+    backgroundColor: '#fdecea',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  errorBoxText: {
+    color: '#c0392b',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  tryAgainLink: {
+    color: '#1a73e8',
+    fontWeight: '600',
+    fontSize: 13,
+    textAlign: 'center',
   },
   submitButton: {
     backgroundColor: '#1a73e8',
