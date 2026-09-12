@@ -1,3 +1,5 @@
+const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const env = require('./config/env');
@@ -14,10 +16,6 @@ const paysharpWebhookRoutes = require('./routes/paysharpWebhook');
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-app.get('/', (_req, res) => {
-  res.json({ service: 'society-app-backend', status: 'running' });
-});
 
 app.use('/auth', authRoutes);
 app.use('/me', meRoutes);
@@ -55,6 +53,36 @@ app.get('/health', async (_req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
+// Serves the mobile app's static web build (mobile/dist, produced by
+// `npx expo export -p web` - see PERSONAL_LAPTOP_SETUP_AND_TESTING.md
+// Section 3) so the whole app - frontend AND API - is reachable through a
+// single host/port/ngrok tunnel. This also makes the app same-origin with
+// its own API in real usage (no cross-origin requests once deployed
+// somewhere real), and is the same pattern a cheap single-service
+// production host (Render/Railway/etc.) would use later - one process,
+// one URL, nothing app-store-related. Placed after every API route above
+// so those always take priority over the static/catch-all behavior below;
+// only requests nothing above matched reach this point.
+const webBuildDir = path.join(__dirname, '..', '..', 'mobile', 'dist');
+if (fs.existsSync(webBuildDir)) {
+  app.use(express.static(webBuildDir));
+  // Single-page app with no URL-based routing (no expo-router) - any
+  // unmatched GET just gets the same index.html and the app's own
+  // in-memory navigation takes it from there. API-style paths that
+  // simply don't exist (typos, removed routes, etc.) still fall through
+  // to Express's normal 404 instead of silently returning the app shell.
+  const apiPrefixes = ['/auth', '/me', '/transactions', '/houses', '/members', '/society', '/assignments', '/webhooks', '/health'];
+  app.get('*', (req, res, next) => {
+    if (apiPrefixes.some((prefix) => req.path.startsWith(prefix))) {
+      return next();
+    }
+    res.sendFile(path.join(webBuildDir, 'index.html'));
+  });
+  console.log(`Serving mobile web build from ${webBuildDir}`);
+} else {
+  console.log('No mobile/dist found - running API-only (run `npx expo export -p web` in mobile/ to also serve the web app from here).');
+}
 
 app.listen(env.port, () => {
   console.log(`society-app-backend listening on http://localhost:${env.port}`);

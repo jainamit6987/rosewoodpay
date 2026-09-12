@@ -14,6 +14,7 @@ import {
 import { apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
+import { openPaymentUrl } from '../utils/upiLinking';
 
 function buildUpiDeepLink({ society, house, amount }) {
   const params = new URLSearchParams({
@@ -97,8 +98,10 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
       // custom-dev-client requirement) - the same native-config complexity
       // this whole screen is avoiding for this pass. openURL's own
       // rejection already tells us "no app can handle this" just as
-      // reliably, without the extra native config.
-      await Linking.openURL(link);
+      // reliably, without the extra native config. On web, openPaymentUrl
+      // forces a top-level navigation instead of window.open - see
+      // utils/upiLinking.js for why that matters.
+      await openPaymentUrl(link);
     } catch {
       setError('No UPI app found on this device to handle the payment link.');
     }

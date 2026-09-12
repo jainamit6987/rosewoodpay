@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking } from 'react-native';
 import { apiGet, apiPost } from '../api/client';
+import { openPaymentUrl } from '../utils/upiLinking';
 
 // Drives the "instant" PaySharp UPI Intent flow shared by SubmitPaymentScreen
 // (Maintenance) and WaterChargeScreen (WaterCharge) - both otherwise-separate
@@ -130,7 +130,7 @@ export function usePaysharpPayment({ accessToken, house, transactionType }) {
       // still open their UPI app manually (or tap "Open in Google Pay" /
       // "Open in PhonePe" below, which retry with the more specific links).
       try {
-        await Linking.openURL(created.intentUrl);
+        await openPaymentUrl(created.intentUrl);
       } catch {
         // Swallowed on purpose - see comment above.
       }
@@ -143,7 +143,7 @@ export function usePaysharpPayment({ accessToken, house, transactionType }) {
   const openSpecificApp = useCallback(async (url) => {
     if (!url) return;
     try {
-      await Linking.openURL(url);
+      await openPaymentUrl(url);
     } catch {
       setError('Could not open that app - is it installed on this device?');
     }

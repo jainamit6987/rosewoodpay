@@ -1,12 +1,19 @@
 # Personal Laptop: Setup and Real-Device Testing Guide
 
-Rewritten 2026-09-11 - the previous version of this file was from very
-early in the project (before most of the backend/mobile app existed) and
-was badly out of date. This version reflects the current state: a full
-Admin+Resident mobile app, and a brand-new PaySharp UPI Intent gateway
-integration that's the whole reason for moving to this laptop (this work
-laptop's network runs a Zscaler web-security proxy that blocks the
-PaySharp order-status endpoint - see `paysharp_sandbox_credentials.txt`).
+Rewritten 2026-09-11, then **Sections 3-5 rewritten again on 2026-09-12**
+once the PWA (Progressive Web App) approach was locked in as this
+project's permanent direction - it's free to distribute (no app stores,
+no Apple Developer account) and works the same way on both iPhone and
+Android. If you did an earlier pass through this guide and got as far as
+Expo Go / scanning a QR code for the Metro bundler, that step no longer
+exists - see Section 3.
+
+The previous (native Expo Go + iOS dev-client) approach is no longer the
+plan. Everything below assumes: `mobile/` is built once into a static
+web bundle (`npx expo export -p web`), and `backend/`'s own Express
+server serves that bundle directly - so there is exactly **one** process,
+one port, and (during testing) one ngrok tunnel for the whole app. No
+Expo Go, no EAS builds, no native iOS/Android config at all.
 
 This machine has no Cursor access, so everything below is meant to be
 followed by hand, without an AI agent driving it.
@@ -184,7 +191,12 @@ runs either):
 | House B-102 (Owner2's own residence, 2000) | `0000000c-0000-0000-0000-00000000000c` |
 | House C-303 (Arrears resident's house, 4 back-months + current, 2200) | `0000000f-0000-0000-0000-00000000000f` |
 
-## 3. Mobile App
+## 3. Mobile App (PWA - Progressive Web App)
+
+No Expo Go, no app-store install. The mobile app is built into a plain
+static website once, and that website is what you open on your phone's
+browser (and optionally "Add to Home Screen" so it behaves like an
+installed app - see Section 5).
 
 ### 3.1 Setup
 
@@ -200,33 +212,47 @@ Edit `mobile/.env`:
 | :--- | :--- |
 | `EXPO_PUBLIC_SUPABASE_URL` | Same as `backend/.env`'s `SUPABASE_URL` |
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Same as `backend/.env`'s `SUPABASE_ANON_KEY` |
-| `EXPO_PUBLIC_BACKEND_URL` | See below - depends on whether you're doing plain feature testing or real PaySharp device testing. |
+| `EXPO_PUBLIC_BACKEND_URL` | **Leave this blank.** See below. |
 
-**For plain feature testing** (not PaySharp), use your machine's **LAN
-IP**, not `localhost` - e.g. `http://192.168.1.23:4000`. A phone running
-Expo Go is a separate device on the network from wherever the backend
-runs. Find your LAN IP with `ipconfig` (Windows, look for `IPv4 Address`
-under your active adapter) and make sure your phone is on the *same*
-Wi-Fi network.
-
-**For PaySharp real-device testing**, use the ngrok HTTPS URL from Section
-4 instead - see why there.
+Leave `EXPO_PUBLIC_BACKEND_URL` empty (just `EXPO_PUBLIC_BACKEND_URL=` or
+delete the line) - as of 2026-09-12, `backend/src/index.js` serves this
+app's own web build directly (Section 3.2), so the app and the API are
+always on the exact same host/port ("same-origin"). Leaving it blank makes
+the app call the API with relative paths (`/health`, `/auth/login`, ...),
+which automatically works no matter what URL the whole thing ends up
+being hosted at - `localhost`, your LAN IP, an ngrok URL today, or a real
+domain later - with **no rebuild needed** when that URL changes. Only set
+it to an absolute URL if you deliberately want the web app and the API on
+two different hosts/ports.
 
 Every variable **must** be prefixed `EXPO_PUBLIC_` to be readable at all -
 Expo only inlines that prefix into the app bundle - and none of them are
-secret once inlined. **Restart the Expo dev server after editing
-`.env`** - values are inlined at bundle time, not read live.
+secret once inlined.
 
-### 3.2 Run it
-
-With the backend already running (Section 1.7):
+### 3.2 Build the web bundle
 
 ```bash
-npx expo start
+npx expo export -p web
 ```
 
-Scan the QR code with the **Expo Go** app (Play Store/App Store) on a
-phone. Sign in with any seeded account from Section 2.
+This produces a static site in `mobile/dist/` (~900KB, ~300 modules -
+that's normal). **Re-run this command every time you change any code
+under `mobile/src/`** - unlike Expo Go's live-reload, this is a one-shot
+build, not a dev server.
+
+### 3.3 View it
+
+With the backend running (Section 1.7) - `backend/src/index.js` detects
+`mobile/dist/` automatically and serves it at `/`:
+
+```bash
+curl http://localhost:4000/
+```
+
+Or just open `http://localhost:4000/` in a browser on this laptop. Sign
+in with any seeded account from Section 2. This confirms the build works
+before involving a phone at all (Section 4 covers making it reachable
+from your iPhone).
 
 ## 4. Real-Device PaySharp Testing
 
@@ -242,10 +268,17 @@ its webhook (`POST /webhooks/paysharp`) - `localhost`/LAN IPs are not
 reachable from PaySharp's servers. **ngrok** (or any similar tunnel tool)
 gives your local backend a temporary public HTTPS URL.
 
-Using that *same* ngrok URL for `EXPO_PUBLIC_BACKEND_URL` too (instead of
-your LAN IP) is simpler and more robust: your phone no longer needs to be
-on the same Wi-Fi as your laptop at all (you can test over cellular data),
-and there's only one URL to keep track of.
+Because `backend/src/index.js` now serves the web app itself (Section
+3.2/3.3), that *same* one ngrok URL is also exactly what you open on your
+iPhone - there's nothing separate to host or deploy. Your phone no longer
+needs to be on the same Wi-Fi as your laptop at all (you can test over
+cellular data), and there's only one URL to keep track of for everything:
+the app, the API, and the webhook.
+
+(If a QR code from an earlier attempt at this guide didn't work on your
+iPhone - that was Expo Go's own Metro-bundler QR code from the
+now-removed `npx expo start` step, a completely different thing from
+ngrok's URL below. That whole step is gone now; ignore it.)
 
 ### 4.2 Set up ngrok
 
@@ -276,10 +309,18 @@ so you'll need to redo steps 4.3/4.4 below whenever that happens.
 Sanity check from any device/browser: `https://abcd-....ngrok-free.app/health`
 should return the same JSON as the local `curl` check in Section 1.8.
 
-### 4.3 Point the mobile app at the ngrok URL
+### 4.3 Open the app through the ngrok URL
 
-Edit `mobile/.env`'s `EXPO_PUBLIC_BACKEND_URL` to the ngrok URL from 4.2,
-then restart `npx expo start` (Section 3.2) so it picks up the change.
+Nothing to edit - `mobile/.env`'s `EXPO_PUBLIC_BACKEND_URL` stays blank
+(Section 3.1), since the app and API are same-origin. Just open the
+ngrok URL itself (from 4.2) on your iPhone's Safari - that single URL
+*is* the app now (served by `backend/src/index.js`'s static-serving,
+Section 3.2/3.3) and the API both.
+
+If you're re-running this after a code change, remember Section 3.2's web
+build is a one-shot snapshot - `npx expo export -p web` again first, then
+just refresh the ngrok URL on your phone (no restart of ngrok or the
+backend needed for that part - only the static files changed).
 
 ### 4.4 Register the webhook URL in PaySharp's dashboard
 
@@ -305,11 +346,15 @@ restart the backend (Section 1.7).
 
 ### 4.6 The actual test walkthrough
 
-1. On your phone (Expo Go), log in as `resident@society.app` / `password`.
+1. On your iPhone, open the ngrok URL from 4.2 in **Safari** and log in
+   as `resident@society.app` / `password`. (Optional: Share -> Add to
+   Home Screen first - see Section 5 - then open it from there instead.)
 2. Go to Pay Maintenance (or Water Charges), enter an amount, and tap
    **"\u26A1 Instant UPI Payment"**.
 3. Your phone's UPI app (Google Pay, PhonePe, etc.) should open with the
-   amount and a merchant name pre-filled. **Read the important caveat in
+   amount and a merchant name pre-filled - this works directly from
+   Safari/a home-screen PWA with no native app-store install and no dev
+   client, unlike the old Expo Go path. **Read the important caveat in
    Section 4.7 before assuming the payment itself will go through.**
 4. Back in the app, you'll see a "Waiting for payment confirmation..."
    screen that checks automatically every few seconds (or tap "Check now").
@@ -352,51 +397,74 @@ curl -X POST "https://abcd-1-2-3-4.ngrok-free.app/webhooks/paysharp?secret=4c7a5
 activity, from Supabase Studio's Table Editor on the `transactions` row
 you just created, or by checking the backend's own terminal logs).
 
-## 5. iPhone vs Android for This Testing
+## 5. iPhone vs Android - Why PWA Removes the Platform Gap
 
-**Android** works out of the box in plain Expo Go - the app already opens
-`upi://...` deep links directly (`Linking.openURL`) with no extra native
-configuration needed; Android resolves it via the system's own UPI-app
-chooser.
+### 5.0 Installing as a Home Screen app (optional but recommended)
 
-**iPhone is more work.** iOS requires every custom URL scheme
-(`upi`, `tez`, `phonepe`, `paytmmp`, etc.) to be explicitly declared under
-`LSApplicationQueriesSchemes` in the native `Info.plist` before
-`Linking.openURL`/`canOpenURL` can find or open any UPI app at all -
-without that declaration, the call silently fails to open anything. Plain
-**Expo Go does not include those declarations** (it's a generic sandbox
-app, not aware of PaySharp/UPI apps specifically), so the Instant UPI
-Payment button's deep-link step will likely not visibly open anything on
-an iPhone running Expo Go, even though the order itself was created
-successfully on PaySharp's side (check the app's own waiting screen and
-the "Open Google Pay"/"Open PhonePe" buttons on it - those try the same
-thing and will have the same limitation).
+Makes it open full-screen, with its own icon, no visible browser
+address bar - the closest thing to "installed like a real app" without
+an app store.
 
-To get the actual "deep link opens a UPI app" behavior on iPhone, you'd
-need a **custom Expo Dev Client build** (via `eas build --profile
-development --platform ios`) with those schemes added to `app.json`'s
-`ios.infoPlist.LSApplicationQueriesSchemes`, which in turn needs:
-- An Apple ID (a free one can do ad-hoc/internal builds, but with the app
-  expiring after ~7 days without a paid $99/year Apple Developer Program
-  membership).
-- An EAS account (free tier available) and ~15-30 minutes for the first
-  build.
+- **iPhone (Safari)**: open the URL, tap the **Share** icon (square with
+  an up-arrow, in the bottom toolbar), scroll down, tap **"Add to Home
+  Screen"**, confirm. A new icon appears on the home screen; opening it
+  from there runs it standalone (no Safari chrome).
+- **Android (Chrome)**: open the URL, tap the **⋮** menu (top-right),
+  tap **"Add to Home screen"** (Chrome may phrase it as **"Install app"**
+  if it detects a valid manifest - either works fine here), confirm.
+
+This step is manual on both platforms (no auto-install prompt) - that's
+expected, not a bug. A proper `manifest.json` + app icons (so the
+installed icon/name look nicer than a generic placeholder) is a nice-to-have
+not yet added to this project - not required for anything in this guide
+to work.
+
+### 5.1 Why this works the same on both platforms
+
+This is the whole reason the PWA approach was locked in on 2026-09-12
+(see `Society_App_Progress_Log.md`). The earlier native-app plan needed
+a **custom Expo Dev Client build** (`eas build`, an Apple ID, ~$99/year
+for real distribution beyond one device) just to get iOS to open a
+`upi://...` link at all - `LSApplicationQueriesSchemes` in the native
+`Info.plist` had to declare every UPI app's scheme up front, and plain
+Expo Go didn't include those declarations. None of that applies to a
+website.
+
+**A webpage (or a PWA added to the Home Screen) navigating to a custom
+scheme link does not require any native declaration on either platform.**
+No `Info.plist` changes, no dev-client build, no Apple Developer account,
+no `eas build`. That's what `openPaymentUrl()`
+(`mobile/src/utils/upiLinking.js`) relies on: on web it forces a
+top-level navigation (`window.open(url, '_self', ...)`, equivalent to
+`location.href = url`) rather than react-native-web's own default of
+`window.open(url, '_blank')` - the latter is unreliable for custom
+schemes on mobile Safari/Chrome, the former is the standard, documented
+way production payment gateways (Razorpay, Juspay, PayU, etc.) trigger
+UPI apps from web checkout pages.
+
+**The one real difference that remains** is app *detection*, not app
+*opening*:
+- **Android**: the generic `upi://pay?...` link (used for the main
+  "Instant UPI Payment" button) triggers Android's own OS-level chooser
+  listing every installed UPI app automatically - from a website exactly
+  the same as from a native app. Nothing to code per app.
+- **iPhone**: there is no web API to detect which UPI apps are installed
+  at all (no `canOpenURL` equivalent exposed to web content) - this is
+  why the app shows a fixed row of named buttons ("Open Google Pay",
+  "Open PhonePe" - the `gpayUrl`/`phonepeUrl` fields PaySharp's own
+  response already provides) rather than trying to be "smart" about
+  what's installed. This is the same pattern every production UPI
+  checkout page uses on iOS. Tapping a button for an app you don't have
+  installed just does nothing visible (Safari silently ignores an
+  unopenable custom scheme) - there's no popup for that today. Educating
+  users to tap the app they actually have (as discussed) is the accepted
+  approach for now; a `blur`/timeout-based "doesn't seem to have opened"
+  fallback message is a possible future improvement, not yet built.
 
 Given the sandbox-VPA limitation in Section 4.7 means the payment likely
-won't complete for real on *either* platform anyway, the pragmatic
-recommendation is:
-
-- **If you have any Android device or emulator available**, use it for
-  the "does the deep link actually open the right app with the right
-  amount" visual check - it just works, no extra setup.
-- **On iPhone**, everything up through order creation, the waiting
-  screen, and the simulated-webhook completion (Section 4.7's `curl`
-  method) is fully testable right now, in plain Expo Go, with no extra
-  setup - only the "app visibly opens" moment itself needs the dev-client
-  detour above, and given it likely wouldn't complete a real payment
-  anyway even if it did open, that detour may not be worth doing right
-  now unless you specifically want to confirm the deep link's shape is
-  correct.
+won't complete for real on *either* platform anyway, both platforms are
+now equally testable through the exact same ngrok URL, in the exact same
+browser-based way, with no separate setup path for either one.
 
 ## 6. Postman Testing (backend only, no mobile app needed)
 

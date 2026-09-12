@@ -15,6 +15,7 @@ import {
 import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
+import { openPaymentUrl } from '../utils/upiLinking';
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -157,8 +158,9 @@ export default function WaterChargeScreen({ house, society, onBack }) {
     const link = buildUpiDeepLink({ society, house, amount: parsedAmount });
     try {
       // Same direct-open (no canOpenURL pre-check) as SubmitPaymentScreen's
-      // own handlePayViaUpi - see that screen's comment for why.
-      await Linking.openURL(link);
+      // own handlePayViaUpi - see that screen's comment for why. openPaymentUrl
+      // forces a top-level navigation on web - see utils/upiLinking.js.
+      await openPaymentUrl(link);
     } catch {
       setSubmitError('No UPI app found on this device to handle the payment link.');
     }

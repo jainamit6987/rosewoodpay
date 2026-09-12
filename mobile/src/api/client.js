@@ -1,10 +1,10 @@
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-
-if (!BACKEND_URL) {
-  throw new Error(
-    'Missing EXPO_PUBLIC_BACKEND_URL. Copy .env.example to .env, point it at your running backend, and restart the Expo dev server.'
-  );
-}
+// Leave EXPO_PUBLIC_BACKEND_URL unset/empty to call the API relative to
+// wherever this page itself was loaded from - the intended setup now that
+// backend/src/index.js also serves this app's own web build (mobile/dist),
+// making frontend and API same-origin. Only set it to an absolute URL
+// (e.g. a LAN IP) if you're running `npx expo start --web` against a
+// backend on a different host/port than the page will be served from.
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
 
 // Thin wrapper so every screen gets the same error shape: a plain Error
 // whose message is the backend's own `{ error: "..." }` string (the same
