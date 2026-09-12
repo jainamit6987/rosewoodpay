@@ -262,34 +262,40 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                   ? 'Creating your payment request\u2026'
                   : paysharp.state === 'timeout'
                   ? "Still haven't heard back"
-                  : 'Waiting for payment confirmation\u2026'}
+                  : 'Choose your UPI app to pay'}
               </Text>
               <Text style={styles.waitingSubtitle}>
                 {paysharp.state === 'creating'
                   ? 'Just a moment.'
                   : paysharp.state === 'timeout'
                   ? 'If you completed the payment, tap Check again.'
-                  : 'Complete the payment in your UPI app, then come back here.'}
+                  : 'Tap the app you have below - this updates on its own once you pay.'}
               </Text>
               {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
                 <>
-                  <TouchableOpacity style={styles.submitButton} onPress={paysharp.checkNow}>
-                    <Text style={styles.submitButtonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
-                  </TouchableOpacity>
                   <View style={styles.appRow}>
                     <TouchableOpacity
                       style={styles.appButton}
                       onPress={() => paysharp.openSpecificApp(paysharp.transaction?.gpayUrl)}
                     >
-                      <Text style={styles.appButtonText}>Open Google Pay</Text>
+                      <Text style={styles.appButtonText}>Google Pay</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.appButton}
                       onPress={() => paysharp.openSpecificApp(paysharp.transaction?.phonepeUrl)}
                     >
-                      <Text style={styles.appButtonText}>Open PhonePe</Text>
+                      <Text style={styles.appButtonText}>PhonePe</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.appButton}
+                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.intentUrl)}
+                    >
+                      <Text style={styles.appButtonText}>Other UPI app</Text>
                     </TouchableOpacity>
                   </View>
+                  <TouchableOpacity style={styles.submitButton} onPress={paysharp.checkNow}>
+                    <Text style={styles.submitButtonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
+                  </TouchableOpacity>
                 </>
               ) : null}
               {paysharp.error ? <Text style={styles.error}>{paysharp.error}</Text> : null}
@@ -313,7 +319,7 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                 <Text style={styles.instantButtonText}>{'\u26A1 Instant UPI Payment'}</Text>
               </TouchableOpacity>
               <Text style={styles.instantHint}>
-                Opens your UPI app with the amount already filled in - confirms automatically once paid.
+                Choose your UPI app with the amount already filled in - confirms automatically once paid.
               </Text>
 
               {paysharp.needsMobileNo ? (
@@ -563,7 +569,8 @@ const styles = StyleSheet.create({
   appButtonText: {
     color: '#1a73e8',
     fontWeight: '600',
-    fontSize: 13,
+    fontSize: 12,
+    textAlign: 'center',
   },
   errorBox: {
     backgroundColor: '#fdecea',

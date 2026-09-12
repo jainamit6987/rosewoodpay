@@ -122,18 +122,21 @@ export function usePaysharpPayment({ accessToken, house, transactionType }) {
       }
       setTransaction(created);
       setState('waiting');
-      // Same deliberate no-canOpenURL-precheck as the existing self-report
-      // "Pay via UPI app" buttons (SubmitPaymentScreen/WaterChargeScreen) -
-      // openURL's own rejection already tells us "nothing handled this".
-      // Not fatal here either way: the order already exists on PaySharp's
-      // side regardless of whether the app opened, and the resident can
-      // still open their UPI app manually (or tap "Open in Google Pay" /
-      // "Open in PhonePe" below, which retry with the more specific links).
-      try {
-        await openPaymentUrl(created.intentUrl);
-      } catch {
-        // Swallowed on purpose - see comment above.
-      }
+      // Deliberately does NOT auto-open created.intentUrl (the generic
+      // upi://pay?... link) here. On Android, multiple installed UPI apps
+      // can all register that same generic scheme, and the OS shows its
+      // own chooser - fine either way. On iOS there is no such chooser: if
+      // more than one installed app claims the same custom scheme, iOS
+      // just picks one on its own (silently, unpredictably) rather than
+      // asking, and if nothing claims the plain "upi" scheme at all, an
+      // automatic `location.href` navigation to it can surface a jarring
+      // native "cannot open page" error the instant this button is
+      // tapped - before the resident even sees which apps are available.
+      // Showing the named-app buttons (Open Google Pay / Open PhonePe /
+      // Other UPI app - see the 'waiting' UI in both screens) and letting
+      // the resident make an explicit, deliberate tap avoids all of that,
+      // and matches how production UPI checkout pages (Razorpay, Juspay,
+      // PayU, etc.) already handle this exact ambiguity on web/iOS.
       startPolling(created.id);
       return created;
     },

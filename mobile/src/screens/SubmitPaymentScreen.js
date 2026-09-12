@@ -192,34 +192,40 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
             ? 'Creating your payment request\u2026'
             : paysharp.state === 'timeout'
             ? "Still haven't heard back"
-            : 'Waiting for payment confirmation\u2026'}
+            : 'Choose your UPI app to pay'}
         </Text>
         <Text style={styles.subtitle}>
           {paysharp.state === 'creating'
             ? 'Just a moment.'
             : paysharp.state === 'timeout'
             ? "This is taking longer than usual. If you completed the payment, tap Check again - otherwise you can cancel and use the self-report option below instead."
-            : "Complete the payment in your UPI app, then come back here - this updates on its own, or tap Check now."}
+            : "Tap the app you have below - the amount is already filled in. This screen updates on its own once you pay, or tap Check now."}
         </Text>
         {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
           <>
-            <TouchableOpacity style={styles.button} onPress={paysharp.checkNow}>
-              <Text style={styles.buttonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
-            </TouchableOpacity>
             <View style={styles.appRow}>
               <TouchableOpacity
                 style={styles.appButton}
                 onPress={() => paysharp.openSpecificApp(paysharp.transaction?.gpayUrl)}
               >
-                <Text style={styles.appButtonText}>Open Google Pay</Text>
+                <Text style={styles.appButtonText}>Google Pay</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.appButton}
                 onPress={() => paysharp.openSpecificApp(paysharp.transaction?.phonepeUrl)}
               >
-                <Text style={styles.appButtonText}>Open PhonePe</Text>
+                <Text style={styles.appButtonText}>PhonePe</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.appButton}
+                onPress={() => paysharp.openSpecificApp(paysharp.transaction?.intentUrl)}
+              >
+                <Text style={styles.appButtonText}>Other UPI app</Text>
               </TouchableOpacity>
             </View>
+            <TouchableOpacity style={styles.button} onPress={paysharp.checkNow}>
+              <Text style={styles.buttonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
+            </TouchableOpacity>
           </>
         ) : null}
         {paysharp.error ? <Text style={styles.error}>{paysharp.error}</Text> : null}
@@ -274,7 +280,7 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
               <Text style={styles.instantButtonText}>{'\u26A1 Instant UPI Payment'}</Text>
             </TouchableOpacity>
             <Text style={styles.instantHint}>
-              Opens your UPI app with the amount already filled in - confirms automatically once paid, no UTR to
+              Choose your UPI app with the amount already filled in - confirms automatically once paid, no UTR to
               copy.
             </Text>
 
@@ -475,7 +481,8 @@ const styles = StyleSheet.create({
   appButtonText: {
     color: '#1a73e8',
     fontWeight: '600',
-    fontSize: 13,
+    fontSize: 12,
+    textAlign: 'center',
   },
   error: {
     color: '#c0392b',
