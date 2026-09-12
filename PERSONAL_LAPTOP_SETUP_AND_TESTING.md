@@ -397,6 +397,26 @@ curl -X POST "https://abcd-1-2-3-4.ngrok-free.app/webhooks/paysharp?secret=4c7a5
 activity, from Supabase Studio's Table Editor on the `transactions` row
 you just created, or by checking the backend's own terminal logs).
 
+To test the **rejection** path instead (auto-Rejects with a reason shown
+in the app, same as an Admin manually rejecting a self-reported payment),
+send `"status": "FAILED"` with a `failureReason` instead:
+
+```bash
+curl -X POST "https://abcd-1-2-3-4.ngrok-free.app/webhooks/paysharp?secret=4c7a55b7c0dc107496eb25a5fb7cebd85b6246eb953f24dab34ad783ba709f5c" \
+  -H "content-type: application/json" \
+  -d "{\"orderId\": \"<the paysharp_order_id>\", \"status\": \"FAILED\", \"amount\": 2200, \"failureReason\": \"MANUALSIMTEST-declined\"}"
+```
+
+**What this does and doesn't prove**, to set the right expectation: both
+of these exercise the exact same webhook-handling code
+(`routes/paysharpWebhook.js` -> `applyGatewayOutcome`) that a real
+PaySharp webhook call would hit - so this genuinely tests our own
+auto-verify/auto-reject/billing-period-closing logic end-to-end. What it
+does *not* test is PaySharp's own real bank-confirmation logic, which the
+sandbox's dummy merchant account can't exercise anyway (see above) - that
+part is simply out of reach in sandbox, on any machine, not something
+this guide can work around further.
+
 ## 5. iPhone vs Android - Why PWA Removes the Platform Gap
 
 ### 5.0 Installing as a Home Screen app (optional but recommended)
