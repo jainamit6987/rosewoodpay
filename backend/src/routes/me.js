@@ -3,6 +3,12 @@ const authenticate = require('../middleware/authenticate');
 
 const router = express.Router();
 
+// Mirrors chk_phone_number_format from
+// 20260725010000_add_phone_number_to_society_members.sql exactly - same
+// pattern backend/src/routes/members.js's own Admin-edit path already
+// validates against.
+const PHONE_NUMBER_PATTERN = /^[0-9+\-\s()]{7,20}$/;
+
 // Every query below runs through req.supabase, which carries the caller's
 // access token - Row Level Security decides what comes back, this route
 // does not add its own authorization checks.
@@ -30,6 +36,11 @@ router.get('/', authenticate, async (req, res) => {
 
   for (const membership of memberships) {
     const entry = {
+      // Needed by the mobile app's new self-service Edit Profile screen to
+      // target PATCH /me/profile at the right row - not previously
+      // returned here since nothing before it ever needed to address a
+      // specific membership row from the client side.
+      id: membership.id,
       society: membership.societies,
       name: membership.name,
       isAdmin: membership.is_admin,
@@ -205,6 +216,84 @@ router.get('/', authenticate, async (req, res) => {
   }
 
   res.json(result);
+});
+
+// PATCH /me/profile - self-service counterpart to Admin-only PATCH
+// /members/:id, scoped to exactly the fields a resident may change about
+// themselves: name and phone_number. Never email (lives on auth.users,
+// out of scope here - see the migration's own comment) or
+// is_admin/is_committee_member/status/society_id (Admin-only, and now
+// also blocked at the database level regardless of caller by
+// guard_society_member_privileged_fields() -
+// 20260913000000_allow_resident_self_service_profile_update.sql).
+//
+// `society_member_id` is required in the body rather than inferred
+// solely from the caller's token: GET /me already returns an array of
+// memberships (a person can belong to more than one society - see its
+// own `unique_society_member UNIQUE (society_id, auth_user_id)`
+// constraint, one row per society), so the client must say which one it
+// means. The ownership check below (`target.auth_user_id === req.user.id`)
+// is what actually matters for security - the new RLS UPDATE policy
+// would reject any other row before the query even gets this far, this
+// is just a clearer 403 than a generic RLS-denied error would be.
+router.patch('/profile', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { society_member_id, name, phone_number } = req.body || {};
+
+  if (!society_member_id) {
+    return res.status(400).json({ error: 'society_member_id is required.' });
+  }
+  if (name === undefined && phone_number === undefined) {
+    return res.status(400).json({ error: 'Provide at least one of name or phone_number to update.' });
+  }
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+    return res.status(400).json({ error: 'name, if provided, must be a non-empty string.' });
+  }
+  if (phone_number !== undefined && phone_number !== null && !PHONE_NUMBER_PATTERN.test(phone_number)) {
+    return res.status(400).json({
+      error: 'phone_number must be 7-20 characters of digits, spaces, +, -, or parentheses.',
+    });
+  }
+
+  const { data: target, error: targetError } = await supabase
+    .from('society_members')
+    .select('id, auth_user_id')
+    .eq('id', society_member_id)
+    .maybeSingle();
+
+  if (targetError) {
+    return res.status(500).json({ error: targetError.message });
+  }
+  if (!target) {
+    return res.status(404).json({ error: 'Membership not found or not accessible.' });
+  }
+  if (target.auth_user_id !== req.user.id) {
+    return res.status(403).json({ error: 'You can only update your own profile.' });
+  }
+
+  const updates = {};
+  if (name !== undefined) updates.name = name.trim();
+  if (phone_number !== undefined) updates.phone_number = phone_number;
+
+  const { data: updated, error: updateError } = await supabase
+    .from('society_members')
+    .update(updates)
+    .eq('id', society_member_id)
+    .select('id, name, phone_number')
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  // Deliberately no audit_events entry here, unlike PATCH /members/:id -
+  // that table's own RLS INSERT policy is Admin-only ("Admins can insert
+  // audit events for their society"), and audit_events is documented as
+  // being for "sensitive administrative and verification actions"
+  // (see its COMMENT ON TABLE in 20260724000000_initial_schema.sql) - a
+  // resident editing their own contact details isn't that; there is
+  // nothing here for an Admin to need an audit trail of.
+  res.json({ id: updated.id, name: updated.name, phoneNumber: updated.phone_number });
 });
 
 module.exports = router;

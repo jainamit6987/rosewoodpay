@@ -23,7 +23,7 @@ import { useAuth } from '../context/AuthContext';
 // section - it's an account-level action, not specific to this one house,
 // but this is now the resident's one detail/settings-style screen, so it
 // lives here rather than cluttering the plain billing dashboard.
-export default function HouseProfileScreen({ houseId, onBack, onChangePassword }) {
+export default function HouseProfileScreen({ houseId, onBack, onChangePassword, onEditProfile }) {
   const { accessToken } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -139,7 +139,11 @@ export default function HouseProfileScreen({ houseId, onBack, onChangePassword }
       </View>
       {isOwner && toggleError ? <Text style={styles.toggleError}>{toggleError}</Text> : null}
 
-      <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
+      <TouchableOpacity style={styles.tile} onPress={onEditProfile}>
+        <Text style={styles.tileTitle}>Edit Profile</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={[styles.tile, styles.tileSpacing]} onPress={onChangePassword}>
         <Text style={styles.tileTitle}>Change Password</Text>
       </TouchableOpacity>
     </ScrollView>
@@ -230,6 +234,9 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#1c1c1e',
+  },
+  tileSpacing: {
+    marginTop: 12,
   },
   error: {
     color: '#c0392b',

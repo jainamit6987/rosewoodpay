@@ -47,6 +47,7 @@ export default function AdminHomeScreen({
   onViewSociety,
   onViewSocietyProfile,
   onChangePassword,
+  onEditProfile,
   onSwitchToResident,
   onLogout,
 }) {
@@ -190,6 +191,11 @@ export default function AdminHomeScreen({
           <Text style={styles.tileTitle}>Reports & Actions</Text>
           <Text style={styles.tileSummary}>Ledger, dues & billing</Text>
         </TouchableOpacity>
+        {onEditProfile ? (
+          <TouchableOpacity style={styles.tile} onPress={onEditProfile}>
+            <Text style={styles.tileTitle}>Edit Profile</Text>
+          </TouchableOpacity>
+        ) : null}
         {onChangePassword ? (
           <TouchableOpacity style={styles.tile} onPress={onChangePassword}>
             <Text style={styles.tileTitle}>Change Password</Text>

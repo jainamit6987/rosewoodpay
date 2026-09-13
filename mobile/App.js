@@ -30,6 +30,7 @@ import MonthEndClosingScreen from './src/screens/MonthEndClosingScreen';
 import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
 import WaterChargeScreen from './src/screens/WaterChargeScreen';
 import ChangePasswordScreen from './src/screens/ChangePasswordScreen';
+import EditProfileScreen from './src/screens/EditProfileScreen';
 
 // No navigation library on purpose: React Navigation 8.x (the version that
 // supports React 19 / React Native 0.86, both pinned by this Expo SDK 57
@@ -141,6 +142,9 @@ function AuthenticatedApp() {
   // through, just the current session ChangePasswordScreen already gets via
   // useAuth() itself).
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Same shape and reachability as showChangePassword above - see
+  // HouseProfileScreen's/AdminHomeScreen's own onEditProfile wiring below.
+  const [showEditProfile, setShowEditProfile] = useState(false);
   // ResidentHomeScreen's own spoke, off tapping its circular house-number
   // avatar - just a boolean, same shape as showChangePassword above: the
   // house it opens is always whichever one effectiveAssignment below is
@@ -428,6 +432,20 @@ function AuthenticatedApp() {
     );
   }
 
+  if (showEditProfile) {
+    return (
+      <EditProfileScreen
+        membership={membership}
+        userEmail={me?.user?.email}
+        onSaved={async () => {
+          await loadMe();
+          setShowEditProfile(false);
+        }}
+        onCancel={() => setShowEditProfile(false)}
+      />
+    );
+  }
+
   if (showReviewQueue) {
     return <AdminReviewScreen isAdmin={!!membership.isAdmin} onBack={() => setShowReviewQueue(false)} />;
   }
@@ -457,6 +475,10 @@ function AuthenticatedApp() {
         // house at all has no HouseProfileScreen to reach, so this stays
         // their only self-service path - never fully removed.
         onChangePassword={hasResidentAccess ? undefined : () => setShowChangePassword(true)}
+        // Same "only offered here when there is no alternative path"
+        // reasoning as onChangePassword just above - once hasResidentAccess
+        // is true, Edit Profile lives on HouseProfileScreen instead.
+        onEditProfile={hasResidentAccess ? undefined : () => setShowEditProfile(true)}
         onSwitchToResident={bothAvailable ? () => setMode('resident') : undefined}
         onLogout={logout}
       />
@@ -499,6 +521,7 @@ function AuthenticatedApp() {
         houseId={effectiveAssignment.houses?.id}
         onBack={() => setShowHouseProfile(false)}
         onChangePassword={() => setShowChangePassword(true)}
+        onEditProfile={() => setShowEditProfile(true)}
       />
     );
   }
