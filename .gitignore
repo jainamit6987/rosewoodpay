@@ -9,11 +9,6 @@
 paysharp_sandbox_credentials.txt
 paysharp_production_credentials.txt
 
-# Cloud Run build-time env vars file (see CLOUD_RUN_DEPLOYMENT.md) -
-# holds real Supabase URL/anon key values, created locally, never
-# committed.
-cloudbuild-env.yaml
-
 # Node
 node_modules/
 npm-debug.log*

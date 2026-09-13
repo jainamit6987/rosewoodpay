@@ -32,18 +32,23 @@ COPY mobile/ ./
 # Build-time config baked into the web bundle by Expo (EXPO_PUBLIC_* vars
 # are inlined into the JS bundle at build time, not read at runtime - see
 # mobile/src/config/supabaseClient.js and mobile/src/api/client.js).
-# These are the same values as mobile/.env. The Supabase URL/anon key are
-# NOT secrets (anon key is meant to be public; real security is Supabase
-# RLS - see the migration in supabase/migrations/ and the earlier chat
-# about this). EXPO_PUBLIC_BACKEND_URL is deliberately left empty so the
-# built app calls the API relative to whatever origin it's served from -
-# this backend, same as locally.
-ARG EXPO_PUBLIC_SUPABASE_URL
-ARG EXPO_PUBLIC_SUPABASE_ANON_KEY
-ENV EXPO_PUBLIC_SUPABASE_URL=$EXPO_PUBLIC_SUPABASE_URL
-ENV EXPO_PUBLIC_SUPABASE_ANON_KEY=$EXPO_PUBLIC_SUPABASE_ANON_KEY
-ENV EXPO_PUBLIC_BACKEND_URL=
-
+#
+# Production incident (2026-09-13): this used to pass these in via
+# `ARG`/`ENV` + Cloud Run's `--build-env-vars-file` flag. That flag is
+# BUILDPACKS-ONLY and is silently ignored whenever a Dockerfile is present
+# (which it is, here) - gcloud still records the intended values as
+# service metadata, which looks like success, but the ARGs never actually
+# received a value, so the bundle shipped with an EMPTY Supabase URL/key
+# and crashed every client with "Missing EXPO_PUBLIC_SUPABASE_URL /
+# EXPO_PUBLIC_SUPABASE_ANON_KEY" the instant it loaded.
+#
+# Fix: rely on Expo CLI's own built-in env file loading instead of Docker
+# build-args at all. `npx expo export` always forces NODE_ENV=production
+# (regardless of any NODE_ENV set outside it - see
+# https://docs.expo.dev/guides/environment-variables/) and therefore
+# always auto-loads mobile/.env.production, already copied in by
+# `COPY mobile/ ./` above. See that file for why it's safe to commit
+# (values aren't secret) and kept in sync with mobile/.env by hand.
 RUN npx expo export -p web
 
 # ---------- Stage 2: the backend server, serving the bundle above ----------

@@ -60,23 +60,20 @@ flag.
 
 ## 4. First deploy
 
-From the repo root (`D:\Users\amjain\Downloads\MyMobApp`):
+From the repo root (`D:\Users\amjain\Downloads\MyMobApp`), as a single
+line (avoid PowerShell's `` ` `` line-continuation for this - a stray
+trailing space after any `` ` `` silently breaks the command):
 
 ```powershell
-gcloud run deploy society-app `
-  --source . `
-  --region asia-south1 `
-  --allow-unauthenticated `
-  --build-env-vars-file cloudbuild-env.yaml `
-  --set-env-vars "SUPABASE_URL=<copy from backend/.env>,SUPABASE_ANON_KEY=<copy from backend/.env>,SUPABASE_SERVICE_ROLE_KEY=<copy from backend/.env>,PAYSHARP_BASE_URL=<copy from backend/.env>,PAYSHARP_API_TOKEN=<copy from backend/.env>,PAYSHARP_WEBHOOK_SECRET=<copy from backend/.env>"
+gcloud run deploy society-app --source . --region asia-south1 --allow-unauthenticated --set-env-vars "SUPABASE_URL=<copy from backend/.env>,SUPABASE_ANON_KEY=<copy from backend/.env>,SUPABASE_SERVICE_ROLE_KEY=<copy from backend/.env>,PAYSHARP_BASE_URL=<copy from backend/.env>,PAYSHARP_API_TOKEN=<copy from backend/.env>,PAYSHARP_WEBHOOK_SECRET=<copy from backend/.env>"
 ```
 
-> **Do not paste real key values into this file or any other file that
-> gets committed to git.** Copy each value straight from your local
-> `backend/.env` directly into the PowerShell command when you run it
-> (or into a throwaway local file that's already covered by
-> `.gitignore`'s `*.env` rule, e.g. `deploy-env-vars.txt`). This doc
-> itself is meant to be committed, so it only ever shows placeholders.
+> **Do not paste real key values into this doc or any other file that
+> gets committed to git** other than `mobile/.env.production` (see
+> below - those two values are the deliberate exception). Copy each
+> `--set-env-vars` value straight from your local `backend/.env` directly
+> into the PowerShell command when you run it. This doc itself is meant
+> to be committed, so it only ever shows placeholders for these.
 
 A few notes on that command:
 
@@ -86,22 +83,20 @@ A few notes on that command:
 - `--allow-unauthenticated` makes the URL publicly reachable (residents
   don't have Google accounts to log in with - your app's own Supabase
   auth is the real login).
-- You still need a small `cloudbuild-env.yaml` file for the two
-  **build-time** (not runtime) values baked into the web bundle - create
-  it next to this file (same rule: real values go in your local copy,
-  never committed - `cloudbuild-env.yaml` is already covered by nothing
-  in `.gitignore` today, so also add it there before creating it):
-
-```yaml
-EXPO_PUBLIC_SUPABASE_URL: "<copy from mobile/.env>"
-EXPO_PUBLIC_SUPABASE_ANON_KEY: "<copy from mobile/.env>"
-```
-
-  (These two happen to not be secret - the anon key is meant to be
-  public - but keeping the habit of "no real values in committed files"
-  consistent everywhere is simpler than remembering exceptions. Do not
-  put `SUPABASE_SERVICE_ROLE_KEY` or any `PAYSHARP_*` value in this file,
-  only the two `EXPO_PUBLIC_*` ones above.)
+- There is **no `--build-env-vars-file` flag here** (production incident,
+  2026-09-13: that flag is buildpacks-only and is silently ignored
+  whenever a Dockerfile is present, which it is here - it looked like it
+  worked because gcloud still records the values as metadata, but the
+  web bundle actually shipped with an empty Supabase URL/key and crashed
+  on load). The two **build-time** values baked into the web bundle
+  (`EXPO_PUBLIC_SUPABASE_URL`/`EXPO_PUBLIC_SUPABASE_ANON_KEY`) instead
+  come from the committed `mobile/.env.production` file, which Expo CLI
+  loads automatically during the `Dockerfile`'s `npx expo export -p web`
+  step - see the comments in both `mobile/.env.production` and the
+  `Dockerfile` for the full explanation. Committing that specific file is
+  intentional and safe (the anon key is meant to be public); if you ever
+  rotate the Supabase project, update `mobile/.env.production` to match
+  `mobile/.env` by hand and redeploy.
 
 The first deploy takes a few minutes (building both stages). When it
 finishes, it prints a **Service URL** like:
