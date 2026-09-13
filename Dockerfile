@@ -15,7 +15,13 @@
 # file and builds the image entirely on Google's servers.
 
 # ---------- Stage 1: build the mobile web bundle ----------
-FROM node:20-alpine AS mobile-build
+# Node 22 (not 20): @supabase/supabase-js's RealtimeClient hard-requires a
+# native `WebSocket` global on Node < 22 (added in Node 22, missing in 20),
+# and throws synchronously from createClient() without one - see the
+# matching comment on the backend stage below, where this actually broke
+# deploys. Using the same major version in both stages here mainly for
+# consistency/cache-sharing, not because the build stage hits that issue.
+FROM node:22-alpine AS mobile-build
 WORKDIR /app/mobile
 
 COPY mobile/package*.json ./
@@ -41,7 +47,18 @@ ENV EXPO_PUBLIC_BACKEND_URL=
 RUN npx expo export -p web
 
 # ---------- Stage 2: the backend server, serving the bundle above ----------
-FROM node:20-alpine AS backend
+# Node 22, not 20 (production incident, 2026-09-13): backend/src/config/
+# supabaseAdmin.js's createClient() throws synchronously - crashing the
+# whole process before it ever reaches app.listen() - on Node < 22,
+# because @supabase/supabase-js's RealtimeClient requires a native
+# `WebSocket` global that doesn't exist until Node 22. This app never
+# actually uses realtime subscriptions, but the client still initializes
+# one internally by default. Confirmed via Cloud Run logs:
+# "Error: Node.js detected but native WebSocket not found. Suggested
+# solution: Ensure you are running Node.js 22+ ...". Worked on developer
+# laptops only because their local Node was already >= 22, masking this
+# until the node:20-alpine container image hit it.
+FROM node:22-alpine AS backend
 WORKDIR /app/backend
 
 COPY backend/package*.json ./

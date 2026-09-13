@@ -104,6 +104,11 @@ if (fs.existsSync(webBuildDir)) {
   console.log('No mobile/dist found - running API-only (run `npx expo export -p web` in mobile/ to also serve the web app from here).');
 }
 
-app.listen(env.port, () => {
-  console.log(`society-app-backend listening on http://localhost:${env.port}`);
+// Explicit '0.0.0.0' (not the Node default, even though that already
+// happens to be all-interfaces here) - Cloud Run's health check connects
+// from outside the container, and a listener bound only to the loopback
+// interface (127.0.0.1) would be unreachable from it. Cheap, zero-risk
+// insurance against that specific documented Cloud Run failure mode.
+app.listen(env.port, '0.0.0.0', () => {
+  console.log(`society-app-backend listening on http://0.0.0.0:${env.port}`);
 });
