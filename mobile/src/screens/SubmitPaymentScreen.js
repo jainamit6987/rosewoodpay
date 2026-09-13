@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -14,19 +13,7 @@ import {
 import { apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
-import { openPaymentUrl } from '../utils/upiLinking';
 import UpiAppPicker from '../components/UpiAppPicker';
-
-function buildUpiDeepLink({ society, house, amount }) {
-  const params = new URLSearchParams({
-    pa: society.upi_vpa,
-    pn: society.upi_payee_name,
-    am: amount,
-    tn: `Maintenance ${house.house_number}`,
-    cu: 'INR',
-  });
-  return `upi://pay?${params.toString()}`;
-}
 
 function formatMonth(periodMonth) {
   return new Date(periodMonth).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
@@ -83,29 +70,6 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
     }
     setError(null);
     paysharp.start(parsedAmount);
-  };
-
-  const handlePayViaUpi = async () => {
-    const parsedAmount = Number(amount);
-    if (!parsedAmount || parsedAmount <= 0) {
-      setError('Enter a valid amount before opening your UPI app.');
-      return;
-    }
-    const link = buildUpiDeepLink({ society, house, amount: parsedAmount });
-    try {
-      // Deliberately skips Linking.canOpenURL() and opens directly instead.
-      // canOpenURL for a custom scheme like upi:// is unreliable on Android
-      // 11+ unless the scheme is declared via a config plugin (a
-      // custom-dev-client requirement) - the same native-config complexity
-      // this whole screen is avoiding for this pass. openURL's own
-      // rejection already tells us "no app can handle this" just as
-      // reliably, without the extra native config. On web, openPaymentUrl
-      // forces a top-level navigation instead of window.open - see
-      // utils/upiLinking.js for why that matters.
-      await openPaymentUrl(link);
-    } catch {
-      setError('No UPI app found on this device to handle the payment link.');
-    }
   };
 
   const handleSubmit = async () => {
@@ -258,6 +222,8 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
 
         {isCash ? null : (
           <>
+            <Text style={styles.sectionLabel}>1. Pay instantly via UPI</Text>
+
             <TouchableOpacity style={styles.instantButton} onPress={handleStartInstantPay} disabled={submitting}>
               <Text style={styles.instantButtonText}>{'\u26A1 Instant UPI Payment'}</Text>
             </TouchableOpacity>
@@ -294,11 +260,13 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
               <Text style={styles.error}>{paysharp.error}</Text>
             ) : null}
 
-            <Text style={styles.orDivider}>{'\u2014 or pay to the society\u2019s own UPI ID and report it yourself \u2014'}</Text>
+            <View style={styles.sectionDivider} />
 
-            <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
-              <Text style={styles.upiButtonText}>Pay via UPI app</Text>
-            </TouchableOpacity>
+            <Text style={styles.sectionLabel}>2. Already paid? Submit details manually</Text>
+            <Text style={styles.helper}>
+              Only if you paid outside this app (e.g. directly to the society's own UPI ID) - an Admin will
+              review it before it's marked as Verified.
+            </Text>
 
             <Text style={styles.label}>Amount paid</Text>
             <TextInput
@@ -427,17 +395,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 16,
   },
-  upiButton: {
-    backgroundColor: '#e8f0fe',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  upiButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
-  },
   instantButton: {
     backgroundColor: '#1a73e8',
     borderRadius: 8,
@@ -456,11 +413,16 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 16,
   },
-  orDivider: {
-    fontSize: 12,
-    color: '#999',
-    textAlign: 'center',
-    marginBottom: 12,
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1c1c1e',
+    marginBottom: 10,
+  },
+  sectionDivider: {
+    height: 1,
+    backgroundColor: '#e5e5ea',
+    marginVertical: 18,
   },
   reviewNoteBox: {
     backgroundColor: '#fff8e1',

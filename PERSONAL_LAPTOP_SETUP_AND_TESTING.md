@@ -85,7 +85,7 @@ Then edit `backend/.env`:
 | `SUPABASE_ANON_KEY` | Supabase Dashboard -> Settings -> API -> `sb_publishable_...` key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard -> Settings -> API -> `sb_secret_...` key (keep this one private) |
 | `PAYSHARP_BASE_URL` | `https://sandbox.paysharp.co.in/external/api/v1/upi` |
-| `PAYSHARP_API_TOKEN` | **Generate fresh from the PaySharp dashboard every session - sandbox tokens expire after ~1 day.** Log into `https://sandbox.paysharp.co.in/client-admin` (new password - not written down anywhere in this repo, check your password manager), go to Settings/Configuration, generate a new token. |
+| `PAYSHARP_API_TOKEN` | **Correction (2026-09-13): does NOT expire after ~1 day** - that was a wrong assumption from the first session, based on it happening to fail the next day. The real cause: generating a new token from the dashboard invalidates whatever token was previously active (there's only ever one live token). **So don't regenerate unless the current one is actually failing with "Access denied"** - if it is, log into `https://sandbox.paysharp.co.in/client-admin` (password in your password manager), go to Settings/Configuration, generate a new token, and immediately update it in `backend/.env` on *every* machine you're testing from (each has its own `.env`, not committed) - the old value stops working the instant a new one is generated. |
 | `PAYSHARP_WEBHOOK_SECRET` | `4c7a55b7c0dc107496eb25a5fb7cebd85b6246eb953f24dab34ad783ba709f5c` (this one does NOT expire - reuse it, it just needs to match whatever you register in the dashboard, see Section 4) |
 
 All three `PAYSHARP_*` variables are optional as far as the backend
@@ -339,10 +339,16 @@ you have a reason to change it.
 
 ### 4.5 Regenerate the API token if needed
 
-PaySharp sandbox tokens expire after about a day. If `backend/.env`'s
-`PAYSHARP_API_TOKEN` is more than a day old, generate a fresh one from the
-same dashboard (Settings/Configuration) and update `backend/.env`, then
-restart the backend (Section 1.7).
+The token does **not** expire on its own (correction, 2026-09-13 - this
+section previously said "after about a day", which was a wrong guess). If
+`POST /transactions/upi-intent` starts failing with `"PaySharp order
+creation failed: Access denied"`, it means a *new* token was generated
+somewhere (the dashboard, or another machine sharing the same account) -
+generating a token invalidates whichever one was previously active.
+Generate a fresh one from the dashboard (Settings/Configuration), update
+`backend/.env` on **every** machine you test from, then restart the
+backend (Section 1.7 - a plain file save won't do it, nodemon doesn't
+watch `.env`).
 
 ### 4.6 The actual test walkthrough
 

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   RefreshControl,
   ScrollView,
@@ -15,7 +14,6 @@ import {
 import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
-import { openPaymentUrl } from '../utils/upiLinking';
 import UpiAppPicker from '../components/UpiAppPicker';
 
 function formatMoney(amount) {
@@ -52,17 +50,6 @@ function statusTextStyle(status) {
   if (status === 'Verified') return styles.badgeTextVerified;
   if (status === 'Rejected' || status === 'Failed') return styles.badgeTextRejected;
   return styles.badgeTextPending;
-}
-
-function buildUpiDeepLink({ society, house, amount }) {
-  const params = new URLSearchParams({
-    pa: society.upi_vpa,
-    pn: society.upi_payee_name,
-    am: amount,
-    tn: `Water Charge ${house.house_number}`,
-    cu: 'INR',
-  });
-  return `upi://pay?${params.toString()}`;
 }
 
 // Resident-facing "pay for extra water" flow - the new S.No item requested
@@ -148,23 +135,6 @@ export default function WaterChargeScreen({ house, society, onBack }) {
     }
     setSubmitError(null);
     paysharp.start(parsedAmount);
-  };
-
-  const handlePayViaUpi = async () => {
-    const parsedAmount = Number(amount);
-    if (!parsedAmount || parsedAmount <= 0) {
-      setSubmitError('Enter a valid amount before opening your UPI app.');
-      return;
-    }
-    const link = buildUpiDeepLink({ society, house, amount: parsedAmount });
-    try {
-      // Same direct-open (no canOpenURL pre-check) as SubmitPaymentScreen's
-      // own handlePayViaUpi - see that screen's comment for why. openPaymentUrl
-      // forces a top-level navigation on web - see utils/upiLinking.js.
-      await openPaymentUrl(link);
-    } catch {
-      setSubmitError('No UPI app found on this device to handle the payment link.');
-    }
   };
 
   const handleSubmit = async () => {
@@ -287,6 +257,8 @@ export default function WaterChargeScreen({ house, society, onBack }) {
             </View>
           ) : (
             <>
+              <Text style={styles.sectionLabel}>1. Pay instantly via UPI</Text>
+
               <Text style={styles.label}>Amount</Text>
               <TextInput
                 style={styles.input}
@@ -330,18 +302,14 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                 </View>
               ) : null}
 
-              <Text style={styles.orDivider}>
-                {'\u2014 or pay to the society\u2019s own UPI ID and report it yourself \u2014'}
+              <View style={styles.sectionDivider} />
+
+              <Text style={styles.sectionLabel}>2. Already paid? Submit details manually</Text>
+              <Text style={styles.cardHint}>
+                Only if you paid outside this app (e.g. directly to the society's own UPI ID) - an Admin will
+                review it before it's marked as Verified.
               </Text>
 
-              <TouchableOpacity style={styles.upiButton} onPress={handlePayViaUpi} disabled={submitting}>
-                <Text style={styles.upiButtonText}>Pay via UPI app</Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {['creating', 'waiting', 'polling', 'timeout'].includes(paysharp.state) ? null : (
-            <>
               <Text style={styles.label}>Amount paid</Text>
               <TextInput
                 style={styles.input}
@@ -501,17 +469,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 14,
   },
-  upiButton: {
-    backgroundColor: '#e8f0fe',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  upiButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
-  },
   instantButton: {
     backgroundColor: '#1a73e8',
     borderRadius: 8,
@@ -530,11 +487,16 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 16,
   },
-  orDivider: {
-    fontSize: 12,
-    color: '#999',
-    textAlign: 'center',
-    marginBottom: 12,
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1c1c1e',
+    marginBottom: 10,
+  },
+  sectionDivider: {
+    height: 1,
+    backgroundColor: '#e5e5ea',
+    marginVertical: 18,
   },
   reviewNoteBox: {
     backgroundColor: '#fff8e1',
