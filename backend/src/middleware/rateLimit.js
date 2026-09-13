@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 
 // Security audit finding (Medium, 2026-09-13): POST /auth/login had no
 // rate limiting at all - real accounts with real money attached are
@@ -17,7 +18,13 @@ const loginRateLimiter = rateLimit({
   max: 10, // 10 FAILED attempts per window per IP+email
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `${req.ip}:${String(req.body?.email || '').toLowerCase().trim()}`,
+  // ipKeyGenerator (not a raw req.ip template string) is required by
+  // express-rate-limit v8 for IPv6 safety - a bare IPv6 address string
+  // lets an attacker rotate suffix bits to present as a "different" key
+  // per attempt while really being the same client, bypassing the limit
+  // entirely. It normalizes to the relevant /56 (v6) or full address (v4)
+  // before we append the email on top.
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${String(req.body?.email || '').toLowerCase().trim()}`,
   // Only count attempts that end in a 4xx/5xx (i.e. a real failed login)
   // against the limit - a resident/admin who legitimately logs in
   // frequently (or the same account being used across many separate test
