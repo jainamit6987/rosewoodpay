@@ -845,6 +845,9 @@ router.post('/upi-intent', authenticate, async (req, res) => {
     intentUrl: intentOrder.intentUrl,
     gpayUrl: intentOrder.gpayUrl,
     phonepeUrl: intentOrder.phonepeUrl,
+    // paytmUrl/bhimUrl/amazonPayUrl are ours, not PaySharp's - see
+    // deriveAdditionalUpiAppUrls's own comment in services/paysharp.js.
+    ...paysharp.deriveAdditionalUpiAppUrls(intentOrder.intentUrl),
   });
 });
 

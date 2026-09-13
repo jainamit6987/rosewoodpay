@@ -16,6 +16,7 @@ import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
 import { openPaymentUrl } from '../utils/upiLinking';
+import UpiAppPicker from '../components/UpiAppPicker';
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -273,26 +274,7 @@ export default function WaterChargeScreen({ house, society, onBack }) {
               </Text>
               {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
                 <>
-                  <View style={styles.appRow}>
-                    <TouchableOpacity
-                      style={styles.appButton}
-                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.gpayUrl)}
-                    >
-                      <Text style={styles.appButtonText}>Google Pay</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.appButton}
-                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.phonepeUrl)}
-                    >
-                      <Text style={styles.appButtonText}>PhonePe</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.appButton}
-                      onPress={() => paysharp.openSpecificApp(paysharp.transaction?.intentUrl)}
-                    >
-                      <Text style={styles.appButtonText}>Other UPI app</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <UpiAppPicker transaction={paysharp.transaction} onOpenApp={paysharp.openSpecificApp} />
                   <TouchableOpacity style={styles.submitButton} onPress={paysharp.checkNow}>
                     <Text style={styles.submitButtonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
                   </TouchableOpacity>
@@ -360,6 +342,16 @@ export default function WaterChargeScreen({ house, society, onBack }) {
 
           {['creating', 'waiting', 'polling', 'timeout'].includes(paysharp.state) ? null : (
             <>
+              <Text style={styles.label}>Amount paid</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={amount}
+                onChangeText={setAmount}
+                editable={!submitting}
+                placeholder="e.g. 300"
+              />
+
               <Text style={styles.label}>UTR / reference number</Text>
               <TextInput
                 style={styles.input}
@@ -379,6 +371,12 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                 editable={!submitting}
               />
 
+              <View style={styles.reviewNoteBox}>
+                <Text style={styles.reviewNoteText}>
+                  This payment will be reviewed by an Admin before it's marked as Verified.
+                </Text>
+              </View>
+
               {submitError ? <Text style={styles.error}>{submitError}</Text> : null}
 
               <TouchableOpacity
@@ -386,7 +384,11 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                 onPress={handleSubmit}
                 disabled={submitting}
               >
-                {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitButtonText}>Submit payment</Text>}
+                {submitting ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.submitButtonText}>Submit payment details</Text>
+                )}
               </TouchableOpacity>
             </>
           )}
@@ -534,6 +536,16 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 12,
   },
+  reviewNoteBox: {
+    backgroundColor: '#fff8e1',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  reviewNoteText: {
+    fontSize: 12,
+    color: '#8a6d1a',
+  },
   waitingBox: {
     backgroundColor: '#f5f6f8',
     borderRadius: 8,
@@ -550,26 +562,6 @@ const styles = StyleSheet.create({
   waitingSubtitle: {
     fontSize: 13,
     color: '#6e6e73',
-    textAlign: 'center',
-  },
-  appRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 4,
-    width: '100%',
-  },
-  appButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#1a73e8',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  appButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
-    fontSize: 12,
     textAlign: 'center',
   },
   errorBox: {

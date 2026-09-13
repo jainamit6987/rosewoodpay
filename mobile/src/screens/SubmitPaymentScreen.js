@@ -15,6 +15,7 @@ import { apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { usePaysharpPayment } from '../hooks/usePaysharpPayment';
 import { openPaymentUrl } from '../utils/upiLinking';
+import UpiAppPicker from '../components/UpiAppPicker';
 
 function buildUpiDeepLink({ society, house, amount }) {
   const params = new URLSearchParams({
@@ -203,26 +204,7 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
         </Text>
         {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
           <>
-            <View style={styles.appRow}>
-              <TouchableOpacity
-                style={styles.appButton}
-                onPress={() => paysharp.openSpecificApp(paysharp.transaction?.gpayUrl)}
-              >
-                <Text style={styles.appButtonText}>Google Pay</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.appButton}
-                onPress={() => paysharp.openSpecificApp(paysharp.transaction?.phonepeUrl)}
-              >
-                <Text style={styles.appButtonText}>PhonePe</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.appButton}
-                onPress={() => paysharp.openSpecificApp(paysharp.transaction?.intentUrl)}
-              >
-                <Text style={styles.appButtonText}>Other UPI app</Text>
-              </TouchableOpacity>
-            </View>
+            <UpiAppPicker transaction={paysharp.transaction} onOpenApp={paysharp.openSpecificApp} />
             <TouchableOpacity style={styles.button} onPress={paysharp.checkNow}>
               <Text style={styles.buttonText}>Check {paysharp.state === 'timeout' ? 'again' : 'now'}</Text>
             </TouchableOpacity>
@@ -318,6 +300,15 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
               <Text style={styles.upiButtonText}>Pay via UPI app</Text>
             </TouchableOpacity>
 
+            <Text style={styles.label}>Amount paid</Text>
+            <TextInput
+              style={styles.input}
+              keyboardType="decimal-pad"
+              value={amount}
+              onChangeText={setAmount}
+              editable={!submitting}
+            />
+
             <Text style={styles.label}>UTR / reference number</Text>
             <Text style={styles.helper}>
               After paying, copy the 12-digit UTR (or reference number) from your UPI app's
@@ -331,6 +322,12 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
               onChangeText={setUtrNumber}
               editable={!submitting}
             />
+
+            <View style={styles.reviewNoteBox}>
+              <Text style={styles.reviewNoteText}>
+                This payment will be reviewed by an Admin before it's marked as Verified.
+              </Text>
+            </View>
           </>
         )}
 
@@ -344,7 +341,7 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
           {submitting ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.buttonText}>{isCash ? 'Record cash payment' : 'Submit payment'}</Text>
+            <Text style={styles.buttonText}>{isCash ? 'Record cash payment' : 'Submit payment details'}</Text>
           )}
         </TouchableOpacity>
 
@@ -465,24 +462,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 12,
   },
-  appRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 12,
-  },
-  appButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#1a73e8',
+  reviewNoteBox: {
+    backgroundColor: '#fff8e1',
     borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
+    padding: 12,
+    marginBottom: 16,
   },
-  appButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
+  reviewNoteText: {
     fontSize: 12,
-    textAlign: 'center',
+    color: '#8a6d1a',
   },
   error: {
     color: '#c0392b',

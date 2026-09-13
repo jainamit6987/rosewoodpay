@@ -84,4 +84,33 @@ function getOrderStatus(orderId) {
   return request('GET', `/order/${encodeURIComponent(orderId)}`);
 }
 
-module.exports = { isConfigured, createIntentOrder, getOrderStatus };
+// PaySharp's own API only ever returns intentUrl/gpayUrl/phonepeUrl
+// (confirmed against their live docs,
+// https://www.paysharp.in/developer/api/v1/upi/reference, on 2026-09-13) -
+// no Paytm/BHIM/Amazon Pay-specific variants. Those three apps each
+// register their own custom URL scheme for the exact same UPI intent query
+// string PaySharp already built into intentUrl (pa/pn/am/tr/tn/cu/etc) -
+// confirmed against multiple independent sources (Juspay's own
+// app-package/scheme reference, and critically Razorpay's own real,
+// documented API response, which shows paytm_url/bhim_url/gpay_url/
+// phonepe_url all sharing byte-for-byte the same query string as
+// intent_url, just with a different scheme prefix) rather than guessed:
+//   Paytm:      paytmmp://upi/pay?<same query as intentUrl>
+//   BHIM:       bhim://upi/pay?<same query as intentUrl>
+//   Amazon Pay: amazonpay://upi/pay?<same query as intentUrl>
+// Derived here purely by re-prefixing intentUrl's own query string -
+// this never invents or changes a single parameter PaySharp itself did not
+// already put there.
+function deriveAdditionalUpiAppUrls(intentUrl) {
+  if (!intentUrl || typeof intentUrl !== 'string') return {};
+  const queryIndex = intentUrl.indexOf('?');
+  if (queryIndex === -1) return {};
+  const query = intentUrl.slice(queryIndex); // includes the leading '?'
+  return {
+    paytmUrl: `paytmmp://upi/pay${query}`,
+    bhimUrl: `bhim://upi/pay${query}`,
+    amazonPayUrl: `amazonpay://upi/pay${query}`,
+  };
+}
+
+module.exports = { isConfigured, createIntentOrder, getOrderStatus, deriveAdditionalUpiAppUrls };
