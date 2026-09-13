@@ -293,6 +293,7 @@ async function main() {
     submitted_by: '00000001-0000-0000-0000-000000000001',
     amount: 500,
     transaction_type: 'Other',
+    direction: 'Dr',
     payee_name: 'Should never be allowed',
     description: 'test',
     utr_number: `${testUtr}RAWBAD`, // utr_number is VARCHAR(32) - stay within that, not just readable
@@ -312,6 +313,7 @@ async function main() {
     submitted_by: '00000001-0000-0000-0000-000000000001',
     amount: 500,
     transaction_type: 'Other',
+    direction: 'Dr',
     description: 'test',
     utr_number: `${testUtr}RAWNOPAY`, // utr_number is VARCHAR(32) - stay within that, not just readable
   });
@@ -327,6 +329,7 @@ async function main() {
     submitted_by: '00000001-0000-0000-0000-000000000001',
     amount: 500,
     transaction_type: 'Other',
+    direction: 'Dr',
     payee_name: 'Should never be allowed',
     utr_number: `${testUtr}RAWNODSC`, // utr_number is VARCHAR(32) - stay within that, not just readable
   });
@@ -342,6 +345,7 @@ async function main() {
     submitted_by: '00000001-0000-0000-0000-000000000001',
     amount: 500,
     transaction_type: 'Other',
+    direction: 'Dr',
     payee_name: 'Should never be allowed',
     description: 'test',
     payment_mode: 'Bitcoin',

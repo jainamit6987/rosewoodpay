@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const env = require('./config/env');
 const supabaseAdmin = require('./config/supabaseAdmin');
 const authRoutes = require('./routes/auth');
@@ -14,8 +15,27 @@ const assignmentsRoutes = require('./routes/assignments');
 const paysharpWebhookRoutes = require('./routes/paysharpWebhook');
 
 const app = express();
+
+// Security hygiene finding (Low, 2026-09-13 audit): no security headers,
+// no explicit body size limit. contentSecurityPolicy/crossOriginEmbedderPolicy
+// are disabled here rather than left at helmet's own defaults - both would
+// otherwise risk breaking the Expo web PWA served below (inline
+// styles/scripts, cross-origin PaySharp UPI intent redirects, etc.), which
+// was never designed against a strict CSP. Every OTHER helmet default
+// (X-Content-Type-Options, X-Frame-Options, HSTS once on HTTPS, etc.)
+// still applies - cheap defense-in-depth with no functional risk.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
 app.use(cors());
-app.use(express.json());
+// 1mb comfortably covers every real request body in this app (JSON only -
+// receipts/proofs are uploaded to Supabase Storage separately, never
+// inlined as base64 here) while still bounding worst-case memory/CPU from
+// an oversized or abusive request body.
+app.use(express.json({ limit: '1mb' }));
 
 app.use('/auth', authRoutes);
 app.use('/me', meRoutes);

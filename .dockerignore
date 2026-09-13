@@ -1,0 +1,32 @@
+# Keeps the upload to Google Cloud Build small and avoids leaking local
+# secrets/artifacts into the build context (Docker COPY can only ever see
+# what's not excluded here).
+
+**/node_modules
+**/.expo
+**/dist
+**/web-build
+**/.git
+
+# Real secrets - never uploaded. Cloud Run gets its env vars set directly
+# in the service config instead (see CLOUD_RUN_DEPLOYMENT.md).
+**/.env
+**/.env.local
+*.env
+!*.env.example
+paysharp_sandbox_credentials.txt
+paysharp_production_credentials.txt
+
+# Not needed at build/runtime - root-level docs/screenshots only (paths
+# anchored with a leading "/" so this does NOT match mobile/assets/*.png,
+# the app's own icons/splash images, which the web build needs).
+/*.md
+/*.csv
+/*.xlsx
+/*.xlsb.xlsx
+/*.jpeg
+/*.jpg
+/*.png
+/*.mmd
+supabase/
+.cursor/

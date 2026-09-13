@@ -11,7 +11,7 @@
 //   node scripts/test-available-to-rent.js
 require('dotenv').config();
 const env = require('../src/config/env');
-const { supabaseAnon } = require('../src/config/supabaseClient');
+const { supabaseAnon, createUserScopedClient } = require('../src/config/supabaseClient');
 const supabaseAdmin = require('../src/config/supabaseAdmin');
 
 const BASE_URL = `http://localhost:${env.port}`;
@@ -130,6 +130,52 @@ async function main() {
     turnOn.body
   );
   check('the flag is actually true in the DB', (await getAvailableToRent(houseA.id)) === true);
+
+  // --- Security regression (2026-09-13 audit finding, HIGH): the Owner
+  // RLS UPDATE policy on `houses` is row-level, so by itself it grants
+  // UPDATE on the WHOLE row, not just available_to_rent - the Express
+  // route above only ever sends that one field, but a direct PostgREST
+  // call using the Owner's own session previously had nothing stopping it
+  // from also changing default_monthly_amount/status/etc. Bypasses the
+  // Express route entirely, going straight through Supabase with the
+  // owner's own RLS-scoped client - the same attack shape a technically-
+  // inclined resident could perform for real, since the anon key is
+  // public. See 20260913010000_harden_transaction_insert_and_house_owner_update.sql.
+  const ownerDirectClient = createUserScopedClient(ownerToken);
+  const { error: ownerDirectPrivilegedUpdateError } = await ownerDirectClient
+    .from('houses')
+    .update({ default_monthly_amount: 1, status: 'Inactive' })
+    .eq('id', houseA.id);
+  check(
+    'a direct (non-Express) update from the Owner changing default_monthly_amount/status is REJECTED by the DB trigger',
+    !!ownerDirectPrivilegedUpdateError
+  );
+  const { data: houseAAfterAttack } = await supabaseAdmin
+    .from('houses')
+    .select('default_monthly_amount, status')
+    .eq('id', houseA.id)
+    .single();
+  check(
+    'default_monthly_amount/status are unchanged after the blocked attempt',
+    Number(houseAAfterAttack.default_monthly_amount) === 1000 && houseAAfterAttack.status === 'Active',
+    houseAAfterAttack
+  );
+
+  // --- Same direct-client path, but only touching available_to_rent (the
+  // one column the trigger must still allow) - proves the trigger is a
+  // genuine column guard, not an accidental blanket deny on this policy. ---
+  const { error: ownerDirectAllowedUpdateError } = await ownerDirectClient
+    .from('houses')
+    .update({ available_to_rent: false })
+    .eq('id', houseA.id);
+  check(
+    'a direct (non-Express) update from the Owner touching ONLY available_to_rent still succeeds',
+    !ownerDirectAllowedUpdateError,
+    ownerDirectAllowedUpdateError
+  );
+  // Restored via the real route (rather than another direct write) so the
+  // rest of this script's flag-state assertions below are unaffected.
+  await patch(`/houses/${houseA.id}/available-to-rent`, ownerToken, { available_to_rent: true });
 
   const meAfterOn = await get('/me', ownerToken);
   const meHouseA = (meAfterOn.body.memberships || [])

@@ -1173,26 +1173,23 @@ router.get('/:id/status', authenticate, async (req, res) => {
     });
   }
 
-  let gatewayData;
-  try {
-    gatewayData = await paysharp.getOrderStatus(transaction.paysharp_order_id);
-  } catch (err) {
-    return res.status(502).json({ error: `Could not reach PaySharp for order status: ${err.message}`, transaction });
-  }
-
   // Uses supabaseAdmin, not the caller's RLS-scoped client, same reasoning
   // as the webhook path - applying a SUCCESS outcome auto-Verifies the
   // transaction, a privilege a resident polling their own payment does not
   // otherwise have (only an Admin can normally call POST /:id/verify).
   // Visibility was already confirmed by the RLS-scoped read above, so this
   // does not leak anything the caller could not already see.
+  //
+  // applyGatewayOutcome itself now calls paysharp.getOrderStatus() - see
+  // its own SECURITY comment in services/transactionGateway.js - so this
+  // route no longer fetches gateway status separately beforehand.
   try {
-    const { transaction: updated } = await applyGatewayOutcome(supabaseAdmin, {
-      orderId: transaction.paysharp_order_id,
-      ...gatewayData,
-    });
+    const { transaction: updated } = await applyGatewayOutcome(supabaseAdmin, transaction.paysharp_order_id);
     return res.json(updated || transaction);
   } catch (err) {
+    if (err.gatewayUnreachable) {
+      return res.status(502).json({ error: err.message, transaction });
+    }
     return res.status(500).json({
       error: `Fetched PaySharp status but applying it failed: ${err.message}`,
       transaction,

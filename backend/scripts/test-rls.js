@@ -64,6 +64,7 @@ async function main() {
     submitted_by: residentUserId,
     amount: 2500,
     utr_number: 'TEST000000R24',
+    direction: 'Cr',
   });
   check('resident CANNOT submit a transaction for a house they are not assigned to', !!insertOtherHouseError);
 
@@ -76,10 +77,60 @@ async function main() {
       submitted_by: residentUserId,
       amount: 2200,
       utr_number: `TEST${Date.now()}`,
+      direction: 'Cr',
     })
     .select()
     .single();
   check('resident CAN submit a transaction for their own assigned house', !insertOwnHouseError);
+
+  // --- Security regression (2026-09-13 audit finding, CRITICAL): the
+  // resident INSERT policy previously only checked submitted_by + an
+  // active assignment, with no restriction on which columns a resident's
+  // own insert could set. A direct PostgREST call (bypassing Express,
+  // same shape as this whole script already uses) could therefore mark a
+  // fabricated payment "Verified"/"Success" with no real PaySharp order
+  // or Admin review behind it at all - free maintenance. See
+  // 20260913010000_harden_transaction_insert_and_house_owner_update.sql. ---
+  const houseA101SocietyId = (await admin.from('houses').select('society_id').eq('id', HOUSE_A101).single()).data
+    .society_id;
+
+  const { error: selfVerifyError } = await resident.from('transactions').insert({
+    society_id: houseA101SocietyId,
+    house_id: HOUSE_A101,
+    submitted_by: residentUserId,
+    amount: 2200,
+    utr_number: `TESTEXPLOIT${Date.now()}`,
+    direction: 'Cr',
+    processing_status: 'Verified',
+    payment_status: 'Success',
+  });
+  check('resident CANNOT self-insert a transaction already marked Verified/Success', !!selfVerifyError);
+
+  const { error: fakeCashError } = await resident.from('transactions').insert({
+    society_id: houseA101SocietyId,
+    house_id: HOUSE_A101,
+    submitted_by: residentUserId,
+    amount: 2200,
+    utr_number: `TESTEXPLOIT2${Date.now()}`,
+    direction: 'Cr',
+    payment_mode: 'Cash',
+  });
+  check('resident CANNOT self-insert a Cash-mode transaction (Cash is Admin-only)', !!fakeCashError);
+
+  const { error: fakeGatewaySuccessError } = await resident.from('transactions').insert({
+    society_id: houseA101SocietyId,
+    house_id: HOUSE_A101,
+    submitted_by: residentUserId,
+    amount: 2200,
+    direction: 'Cr',
+    payment_gateway: 'paysharp',
+    paysharp_order_id: `11111111-1111-1111-1111-${Date.now()}`.slice(0, 36),
+    gateway_status: 'SUCCESS',
+  });
+  check(
+    'resident CANNOT self-insert a fabricated PaySharp order already at gateway_status=SUCCESS (must start PENDING)',
+    !!fakeGatewaySuccessError
+  );
 
   // --- Allocation-level RLS: billing_period_id validity now lives on
   //     transaction_allocations, not on transactions itself. ---

@@ -1,12 +1,14 @@
 const express = require('express');
 const { supabaseAnon, createUserScopedClient } = require('../config/supabaseClient');
+const { loginRateLimiter, authRateLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
+router.use(authRateLimiter);
 
 // The mobile client will eventually call Supabase Auth directly with the
 // anon key. This endpoint exists so the same login flow can be exercised
 // and tested from the backend before the mobile app exists.
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) {
     return res.status(400).json({ error: 'email and password are required.' });
@@ -15,7 +17,14 @@ router.post('/login', async (req, res) => {
   const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
 
   if (error) {
-    return res.status(401).json({ error: error.message });
+    // Security audit finding (Low, 2026-09-13): previously passed
+    // Supabase's own error.message straight through, which can in theory
+    // distinguish account states (e.g. unconfirmed vs. wrong password) and
+    // help enumerate valid emails. Always the same generic message to the
+    // client now; the real reason is still logged server-side for support/
+    // debugging.
+    console.error(`login failed for ${email}: ${error.message}`);
+    return res.status(401).json({ error: 'Invalid email or password.' });
   }
 
   res.json({
