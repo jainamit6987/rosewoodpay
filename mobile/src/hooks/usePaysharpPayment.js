@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../api/client';
 import { openPaymentUrl } from '../utils/upiLinking';
+import { useAuth } from '../context/AuthContext';
 
 // Drives the "instant" PaySharp UPI Intent flow shared by SubmitPaymentScreen
 // (Maintenance) and WaterChargeScreen (WaterCharge) - both otherwise-separate
@@ -33,6 +34,22 @@ export function usePaysharpPayment({ accessToken, house, transactionType }) {
 
   const pollTimerRef = useRef(null);
   const pollDeadlineRef = useRef(null);
+
+  // Suspends the app-wide inactivity auto-logout (see AuthContext.js) for
+  // as long as a UPI payment is actually in flight ('waiting' - order
+  // created, about to open a UPI app - through 'polling'). Opening an
+  // external UPI app backgrounds this app/tab, and completing a real
+  // payment there (PIN entry, bank confirmation, a slow network) can
+  // easily take longer than the 5-minute inactivity window on its own -
+  // that backgrounded stretch must NOT count against the resident here,
+  // unlike every other reason the app might be backgrounded.
+  const { pauseAutoLogout, resumeAutoLogout } = useAuth();
+  const inFlight = state === 'waiting' || state === 'polling';
+  useEffect(() => {
+    if (!inFlight) return undefined;
+    pauseAutoLogout();
+    return () => resumeAutoLogout();
+  }, [inFlight, pauseAutoLogout, resumeAutoLogout]);
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {

@@ -12,7 +12,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginScreen() {
-  const { login, authError } = useAuth();
+  const { login, authError, logoutReason } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -32,6 +32,10 @@ export default function LoginScreen() {
     >
       <Text style={styles.title}>Society Maintenance</Text>
       <Text style={styles.subtitle}>Sign in to view your dues and submit a payment</Text>
+
+      {logoutReason === 'inactivity' ? (
+        <Text style={styles.notice}>You were signed out after 5 minutes of inactivity. Please sign in again.</Text>
+      ) : null}
 
       <TextInput
         style={styles.input}
@@ -100,6 +104,16 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     marginBottom: 12,
     fontSize: 14,
+  },
+  notice: {
+    color: '#1a73e8',
+    backgroundColor: '#e8f0fe',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 16,
+    fontSize: 14,
+    textAlign: 'center',
   },
   button: {
     backgroundColor: '#1a73e8',
