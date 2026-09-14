@@ -93,6 +93,10 @@ export default function HouseDashboardScreen({
 
   const [editingResidents, setEditingResidents] = useState(false);
   const [residentRowState, setResidentRowState] = useState({});
+  // assignmentId -> true while its "remove this Tenant?" confirmation
+  // (with the Suspend reminder below) is showing, mid-action, before the
+  // actual /revoke call fires - see requestRemove/cancelConfirmRemove.
+  const [confirmingRemove, setConfirmingRemove] = useState({});
 
   const [addQuery, setAddQuery] = useState('');
   const [addResults, setAddResults] = useState([]);
@@ -149,22 +153,35 @@ export default function HouseDashboardScreen({
     setRefreshing(false);
   };
 
+  // A house may have at most one Active Tenant (new rule, 2026-09-14 -
+  // see backend/src/routes/assignments.js's hasActiveTenantOnHouse) -
+  // Owner/Occupant are unaffected. Used both to grey out the "Tenant"
+  // chip below before the Admin even tries, and to pick a sensible
+  // default selection when opening the add-resident form.
+  const hasActiveTenant = (dashboard?.residents || []).some((r) => r.relationshipType === 'Tenant');
+
   const resetAddForm = () => {
     setAddQuery('');
     setAddResults([]);
     setAddSearchError(null);
     setAddSelectedMember(null);
-    setAddRelationshipType('Tenant');
+    setAddRelationshipType(hasActiveTenant ? 'Owner' : 'Tenant');
     setAddError(null);
   };
 
   const toggleEditResidents = () => {
     setEditingResidents((prev) => !prev);
     setResidentRowState({});
+    setConfirmingRemove({});
     resetAddForm();
   };
 
   const handleRevoke = async (resident) => {
+    setConfirmingRemove((prev) => {
+      const next = { ...prev };
+      delete next[resident.assignmentId];
+      return next;
+    });
     setResidentRowState((prev) => ({ ...prev, [resident.assignmentId]: { busy: true, error: null } }));
     try {
       await apiPost(`/assignments/${resident.assignmentId}/revoke`, accessToken);
@@ -180,6 +197,34 @@ export default function HouseDashboardScreen({
       // routes/assignments.js).
       setResidentRowState((prev) => ({ ...prev, [resident.assignmentId]: { busy: false, error: err.message } }));
     }
+  };
+
+  // Tenant removal only (2026-09-14, requested directly by the user) -
+  // Owner/Occupant removal stays a single immediate tap, unchanged. Shows
+  // an inline Cancel/Confirm step first, with a reminder that removing
+  // this link does NOT touch the member's account itself: if they are not
+  // getting a new house association, the Admin should separately go
+  // Suspend them from Members - otherwise the member stays an Active
+  // login with no house at all. There is no real "delete" in this app
+  // (society_members/auth accounts are never hard-deleted - transactions.
+  // submitted_by has an ON DELETE RESTRICT FK to auth.users, so anyone who
+  // ever paid can never be deleted outright); Suspend is the actual
+  // equivalent action, hence naming it explicitly here rather than saying
+  // "delete".
+  const requestRemove = (resident) => {
+    if (resident.relationshipType !== 'Tenant') {
+      handleRevoke(resident);
+      return;
+    }
+    setConfirmingRemove((prev) => ({ ...prev, [resident.assignmentId]: true }));
+  };
+
+  const cancelConfirmRemove = (assignmentId) => {
+    setConfirmingRemove((prev) => {
+      const next = { ...prev };
+      delete next[assignmentId];
+      return next;
+    });
   };
 
   const runAddSearch = useCallback(
@@ -524,13 +569,39 @@ export default function HouseDashboardScreen({
               {rowState.error ? <Text style={styles.rowError}>{rowState.error}</Text> : null}
 
               {editingResidents ? (
-                <TouchableOpacity
-                  style={styles.removeButton}
-                  onPress={() => handleRevoke(resident)}
-                  disabled={rowState.busy}
-                >
-                  <Text style={styles.removeButtonText}>{rowState.busy ? 'Removing…' : 'Remove'}</Text>
-                </TouchableOpacity>
+                confirmingRemove[resident.assignmentId] ? (
+                  <View>
+                    <Text style={styles.confirmRemoveText}>
+                      Removing this Tenant only ends their link to this house - it does not touch their account. If{' '}
+                      {resident.memberName || 'this member'} is not getting a new house association, remember to
+                      Suspend them from Members afterward, or they stay an active login with no house.
+                    </Text>
+                    <View style={styles.confirmRemoveRow}>
+                      <TouchableOpacity
+                        style={styles.cancelRemoveButton}
+                        onPress={() => cancelConfirmRemove(resident.assignmentId)}
+                        disabled={rowState.busy}
+                      >
+                        <Text style={styles.cancelRemoveButtonText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.removeButton, styles.confirmRemoveButtonFlex]}
+                        onPress={() => handleRevoke(resident)}
+                        disabled={rowState.busy}
+                      >
+                        <Text style={styles.removeButtonText}>{rowState.busy ? 'Removing…' : 'Confirm Remove'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.removeButton}
+                    onPress={() => requestRemove(resident)}
+                    disabled={rowState.busy}
+                  >
+                    <Text style={styles.removeButtonText}>{rowState.busy ? 'Removing…' : 'Remove'}</Text>
+                  </TouchableOpacity>
+                )
               ) : (
                 <Text style={styles.viewMemberHint}>{resident.memberId ? 'Tap to view member →' : ''}</Text>
               )}
@@ -553,16 +624,30 @@ export default function HouseDashboardScreen({
               </View>
 
               <View style={styles.roleRow}>
-                {RELATIONSHIP_TYPES.map((type) => (
-                  <TouchableOpacity
-                    key={type}
-                    style={[styles.roleChip, addRelationshipType === type && styles.roleChipActive]}
-                    onPress={() => setAddRelationshipType(type)}
-                    disabled={addBusy}
-                  >
-                    <Text style={[styles.roleChipText, addRelationshipType === type && styles.roleChipTextActive]}>{type}</Text>
-                  </TouchableOpacity>
-                ))}
+                {RELATIONSHIP_TYPES.map((type) => {
+                  // Tenant only - see hasActiveTenant above. Greyed out
+                  // here rather than just letting the Admin hit the
+                  // backend's 409, so the "must remove the existing one
+                  // first" rule is obvious before they even try.
+                  const disabled = addBusy || (type === 'Tenant' && hasActiveTenant);
+                  return (
+                    <TouchableOpacity
+                      key={type}
+                      style={[
+                        styles.roleChip,
+                        addRelationshipType === type && styles.roleChipActive,
+                        disabled && styles.roleChipDisabled,
+                      ]}
+                      onPress={() => !disabled && setAddRelationshipType(type)}
+                      disabled={disabled}
+                    >
+                      <Text style={[styles.roleChipText, addRelationshipType === type && styles.roleChipTextActive]}>
+                        {type}
+                        {type === 'Tenant' && hasActiveTenant ? ' (taken)' : ''}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
 
               {addError ? <Text style={styles.rowError}>{addError}</Text> : null}
@@ -722,6 +807,32 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     fontWeight: '600',
     fontSize: 13,
+  },
+  confirmRemoveText: {
+    fontSize: 12,
+    color: '#6e6e73',
+    marginBottom: 10,
+  },
+  confirmRemoveRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  cancelRemoveButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d0d0d0',
+    borderRadius: 8,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  cancelRemoveButtonText: {
+    color: '#6e6e73',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  confirmRemoveButtonFlex: {
+    flex: 1,
+    marginTop: 0,
   },
   rowError: {
     color: '#c0392b',
@@ -918,6 +1029,10 @@ const styles = StyleSheet.create({
   roleChipActive: {
     backgroundColor: '#e8f0fe',
     borderColor: '#1a73e8',
+  },
+  roleChipDisabled: {
+    backgroundColor: '#f5f5f7',
+    borderColor: '#e0e0e0',
   },
   roleChipText: {
     fontSize: 13,

@@ -50,6 +50,33 @@ async function hasExistingAssignment(supabase, societyMemberId, houseId, exclude
   return (data || []).length > 0;
 }
 
+// New rule (2026-09-14, requested directly by the user): a house may
+// have at most one Active Tenant at a time - before adding a new Tenant,
+// the existing one must be removed first. Deliberately scoped to Tenant
+// ONLY: Owner keeps its existing "co-owners are allowed" behavior
+// unchanged (see hasOtherActiveOwner just below), and Occupant remains
+// unrestricted (any number of Active Occupants is fine, e.g. multiple
+// family members living in) - the user explicitly confirmed both of
+// those should stay as-is. Checked at create and reassign (not just
+// approve) so a blocked attempt never even leaves a stray Pending row
+// behind, matching the House Dashboard's own create-then-immediately-
+// approve UI flow. Also backed by a DB-level partial unique index (see
+// 20260914000000_enforce_single_active_tenant_per_house.sql) for the same
+// belt-and-suspenders reasons as hasExistingAssignment/
+// unique_active_assignment_per_member_house above.
+async function hasActiveTenantOnHouse(supabase, houseId, excludeAssignmentId) {
+  let query = supabase
+    .from('resident_house_assignments')
+    .select('id')
+    .eq('house_id', houseId)
+    .eq('relationship_type', 'Tenant')
+    .eq('status', 'Active');
+  if (excludeAssignmentId) query = query.neq('id', excludeAssignmentId);
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data || []).length > 0;
+}
+
 // Owner links are a legal fact about a house (who owns it of record),
 // deliberately treated as structurally permanent - unlike Tenant/Occupant
 // links, which come and go freely with zero restriction (a house with no
@@ -243,11 +270,13 @@ router.post('/', authenticate, async (req, res) => {
     return res.status(403).json({ error: 'Only an Admin of this society can create a house assignment.' });
   }
 
-  let house, member, duplicate;
+  let house, member, duplicate, tenantTaken;
   try {
     house = await getHouse(supabase, house_id);
     member = await getActiveMemberCheck(supabase, society_member_id);
     duplicate = house && member ? await hasExistingAssignment(supabase, society_member_id, house_id) : false;
+    tenantTaken =
+      house && (relationship_type || 'Owner') === 'Tenant' ? await hasActiveTenantOnHouse(supabase, house_id) : false;
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -269,6 +298,11 @@ router.post('/', authenticate, async (req, res) => {
   }
   if (duplicate) {
     return res.status(409).json({ error: 'This member already has a Pending or Active assignment to this house.' });
+  }
+  if (tenantTaken) {
+    return res.status(409).json({
+      error: 'This house already has an Active Tenant. Remove that assignment first before adding a new Tenant.',
+    });
   }
 
   const { data: created, error: createError } = await supabase
@@ -330,6 +364,20 @@ router.post('/:id/approve', authenticate, async (req, res) => {
     return res.status(409).json({ error: `This assignment is "${assignment.status}", not Pending - nothing to approve.` });
   }
 
+  if (assignment.relationship_type === 'Tenant') {
+    let tenantTaken;
+    try {
+      tenantTaken = await hasActiveTenantOnHouse(supabase, assignment.house_id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (tenantTaken) {
+      return res.status(409).json({
+        error: 'This house already has an Active Tenant. Remove that assignment first before approving a new one.',
+      });
+    }
+  }
+
   const { data: updated, error: updateError } = await supabase
     .from('resident_house_assignments')
     .update({ status: 'Active', approved_by: req.user.id, approved_at: new Date().toISOString() })
@@ -339,7 +387,15 @@ router.post('/:id/approve', authenticate, async (req, res) => {
 
   if (updateError) {
     if (updateError.code === PG_UNIQUE_VIOLATION) {
-      return res.status(409).json({ error: 'This member already has another active assignment to this house.' });
+      // Either this member already has another active assignment to this
+      // house, or (new, 2026-09-14) a concurrent request just took this
+      // house's one Active-Tenant slot first - see
+      // unique_active_tenant_per_house. The app-level check above already
+      // catches this in the normal case; this is only the race-condition
+      // fallback.
+      return res.status(409).json({
+        error: 'Could not approve - either this member already has another active assignment to this house, or someone else just took this house\'s Tenant slot. Please refresh and try again.',
+      });
     }
     return res.status(500).json({ error: updateError.message });
   }
@@ -494,11 +550,12 @@ router.post('/:id/reassign', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'Nothing to reassign - the new values are identical to the current assignment.' });
   }
 
-  let house, member, duplicate;
+  let house, member, duplicate, tenantTaken;
   try {
     house = house_id !== undefined ? await getHouse(supabase, targetHouseId) : { id: targetHouseId, society_id: societyId };
     member = society_member_id !== undefined ? await getActiveMemberCheck(supabase, targetMemberId) : { id: targetMemberId, society_id: societyId, status: 'Active' };
     duplicate = house && member ? await hasExistingAssignment(supabase, targetMemberId, targetHouseId, id) : false;
+    tenantTaken = house && targetRelationship === 'Tenant' ? await hasActiveTenantOnHouse(supabase, targetHouseId, id) : false;
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -520,6 +577,11 @@ router.post('/:id/reassign', authenticate, async (req, res) => {
   }
   if (duplicate) {
     return res.status(409).json({ error: 'That member already has a Pending or Active assignment to that house.' });
+  }
+  if (tenantTaken) {
+    return res.status(409).json({
+      error: 'That house already has an Active Tenant. Remove that assignment first before reassigning a new one there.',
+    });
   }
 
   // Same "never leave a house without an Owner of record" rule as
@@ -571,7 +633,12 @@ router.post('/:id/reassign', authenticate, async (req, res) => {
     // case.
     await supabase.from('resident_house_assignments').update({ status: 'Active' }).eq('id', id).catch(() => {});
     if (createError.code === PG_UNIQUE_VIOLATION) {
-      return res.status(409).json({ error: 'That member already has another active assignment to that house.' });
+      // Same race-condition fallback as /:id/approve above - the
+      // app-level tenantTaken check earlier in this route already covers
+      // the normal case.
+      return res.status(409).json({
+        error: 'Could not reassign - either that member already has another active assignment to that house, or someone else just took that house\'s Tenant slot. Please refresh and try again.',
+      });
     }
     return res.status(500).json({ error: createError.message });
   }

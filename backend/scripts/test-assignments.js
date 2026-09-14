@@ -509,6 +509,99 @@ async function main() {
     revokeSoleTenant.body
   );
 
+  // --- Max-one-Active-Tenant-per-house guard (2026-09-14), in isolation:
+  // own throwaway house/members, untangled from the flows above. Owner/
+  // Occupant are deliberately NOT subject to this - only Tenant is. ---
+  const { data: tenantGuardHouse, error: tenantGuardHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `T1-${houseTag}`, type: 'Flat', default_monthly_amount: 1000 })
+    .select()
+    .single();
+  if (tenantGuardHouseError) throw new Error(`setup tenantGuardHouse insert failed: ${tenantGuardHouseError.message}`);
+
+  const tenantAResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: `${testTag.toLowerCase()}tenanta@example.com`, name: 'Tenant A', password: memberPassword });
+  const tenantAId = tenantAResult.body.id;
+  createdMemberIds.push(tenantAId);
+  createdAuthUserIds.push(tenantAResult.body.auth_user_id);
+
+  const tenantBResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: `${testTag.toLowerCase()}tenantb@example.com`, name: 'Tenant B', password: memberPassword });
+  const tenantBId = tenantBResult.body.id;
+  createdMemberIds.push(tenantBId);
+  createdAuthUserIds.push(tenantBResult.body.auth_user_id);
+
+  const { data: activeTenantA, error: activeTenantAError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: tenantAId, house_id: tenantGuardHouse.id, relationship_type: 'Tenant', status: 'Active', approved_at: new Date().toISOString() })
+    .select()
+    .single();
+  if (activeTenantAError) throw new Error(`setup activeTenantA insert failed: ${activeTenantAError.message}`);
+
+  check(
+    'creating a second Tenant on a house that already has an Active Tenant is rejected (409)',
+    (await post('/assignments', adminToken, { society_id: SOCIETY_ID, society_member_id: tenantBId, house_id: tenantGuardHouse.id, relationship_type: 'Tenant' })).status === 409
+  );
+  check(
+    'creating an Owner on that same house (still) succeeds (201) - the guard is Tenant-only',
+    (await post('/assignments', adminToken, { society_id: SOCIETY_ID, society_member_id: tenantBId, house_id: tenantGuardHouse.id, relationship_type: 'Owner' })).status === 201
+  );
+
+  // A Pending Tenant row created BEFORE the house had an Active Tenant
+  // must still be blocked at approve-time if one shows up in the
+  // meantime, not just at create-time.
+  const tenantCResult = await post('/members', adminToken, { society_id: SOCIETY_ID, email: `${testTag.toLowerCase()}tenantc@example.com`, name: 'Tenant C', password: memberPassword });
+  const tenantCId = tenantCResult.body.id;
+  createdMemberIds.push(tenantCId);
+  createdAuthUserIds.push(tenantCResult.body.auth_user_id);
+  const { data: pendingTenantHouse, error: pendingTenantHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `T2-${houseTag}`, type: 'Flat', default_monthly_amount: 1000 })
+    .select()
+    .single();
+  if (pendingTenantHouseError) throw new Error(`setup pendingTenantHouse insert failed: ${pendingTenantHouseError.message}`);
+  const pendingTenantCreate = await post('/assignments', adminToken, { society_id: SOCIETY_ID, society_member_id: tenantCId, house_id: pendingTenantHouse.id, relationship_type: 'Tenant' });
+  const pendingTenantCId = pendingTenantCreate.body.id;
+  // tenantAId already has an Active row elsewhere (tenantGuardHouse), and
+  // the unique-per-member-house index is scoped to (member, house), not
+  // global, so reusing tenantAId on this different house is legal here.
+  const { error: raceTenantError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: tenantAId, house_id: pendingTenantHouse.id, relationship_type: 'Tenant', status: 'Active', approved_at: new Date().toISOString() });
+  if (raceTenantError) throw new Error(`setup raceTenant insert failed: ${raceTenantError.message}`);
+  check(
+    'approving a Pending Tenant is rejected (409) if another Active Tenant appeared on that house in the meantime',
+    (await post(`/assignments/${pendingTenantCId}/approve`, adminToken)).status === 409
+  );
+
+  // A wholly separate Active assignment (own throwaway house/member),
+  // reassigned to try to land INTO tenantGuardHouse as a Tenant while
+  // activeTenantA (Tenant A) still holds that house's one slot.
+  const { data: reassignSourceHouse, error: reassignSourceHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `T3-${houseTag}`, type: 'Flat', default_monthly_amount: 1000 })
+    .select()
+    .single();
+  if (reassignSourceHouseError) throw new Error(`setup reassignSourceHouse insert failed: ${reassignSourceHouseError.message}`);
+  const { data: reassignSourceAssignment, error: reassignSourceAssignmentError } = await supabaseAdmin
+    .from('resident_house_assignments')
+    .insert({ society_member_id: tenantCId, house_id: reassignSourceHouse.id, relationship_type: 'Occupant', status: 'Active', approved_at: new Date().toISOString() })
+    .select()
+    .single();
+  if (reassignSourceAssignmentError) throw new Error(`setup reassignSourceAssignment insert failed: ${reassignSourceAssignmentError.message}`);
+  check(
+    'reassigning a different member INTO a Tenant role on a house that already has an Active Tenant is rejected (409)',
+    (await post(`/assignments/${reassignSourceAssignment.id}/reassign`, adminToken, { house_id: tenantGuardHouse.id, relationship_type: 'Tenant' })).status === 409
+  );
+
+  // Revoking the existing Active Tenant frees the slot back up.
+  const revokeActiveTenantA = await post(`/assignments/${activeTenantA.id}/revoke`, adminToken);
+  check('revoking the Active Tenant succeeds (200)', revokeActiveTenantA.status === 200 && revokeActiveTenantA.body.status === 'Revoked', revokeActiveTenantA.body);
+  const createTenantBAfterFree = await post('/assignments', adminToken, { society_id: SOCIETY_ID, society_member_id: tenantBId, house_id: tenantGuardHouse.id, relationship_type: 'Tenant' });
+  check(
+    'once the slot is freed, creating a new Tenant on that house succeeds (201)',
+    createTenantBAfterFree.status === 201,
+    createTenantBAfterFree.body
+  );
+
   console.log(`\n${passCount} passed, ${failCount} failed.`);
 
   // --- Cleanup ---
@@ -524,7 +617,10 @@ async function main() {
     const { error: cleanupSociety2Error } = await supabaseAdmin.from('societies').delete().eq('id', society2Id);
     if (cleanupSociety2Error) console.error('cleanup: deleting society2 failed:', cleanupSociety2Error.message);
   }
-  const { error: cleanupHousesError } = await supabaseAdmin.from('houses').delete().in('id', [house1.id, house2.id, guardHouse1.id, guardHouse2.id]);
+  const { error: cleanupHousesError } = await supabaseAdmin
+    .from('houses')
+    .delete()
+    .in('id', [house1.id, house2.id, guardHouse1.id, guardHouse2.id, tenantGuardHouse.id, pendingTenantHouse.id, reassignSourceHouse.id]);
   if (cleanupHousesError) console.error('cleanup: deleting houses failed:', cleanupHousesError.message);
 
   if (createdMemberIds.length > 0) {
