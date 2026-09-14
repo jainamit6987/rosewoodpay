@@ -10,15 +10,23 @@
 // does not provide those three - see that function's own comment for the
 // (verified, not guessed) URL schemes used.
 //
-// `color`/`monogram` are a placeholder stand-in for each app's real icon -
-// no official logo image assets are in this repo yet. Swap in real image
-// assets later by adding an `icon: require('../../assets/upi-icons/....png')`
-// field per entry here and rendering an <Image source={app.icon}> instead
-// of the monogram circle in UpiAppPicker.js - nothing else needs to change.
+// `icon` (2026-09-14) - real logos, replacing the earlier colored-
+// monogram placeholders. Each PNG in ../../assets/upi-icons/ was fetched
+// directly from Wikimedia Commons (a standard source for exactly this
+// "identify the payment app in a picker" use case - the same practice
+// real gateways like Razorpay/PayU/Juspay follow on their own checkout
+// pages) at scripts/fetch-upi-icons.js's own recorded source URLs. They
+// are wide wordmark logos (not square glyphs - none of these apps have a
+// clean separate square icon on Commons), which is why UpiAppPicker.js
+// renders them as wide rounded-rect cards, not circular monogram tiles.
+// If the user later obtains official brand-kit assets directly from each
+// company (Google Pay for Business / PhonePe partner kit / Paytm / NPCI's
+// BHIM / Amazon Pay), just overwrite the matching PNG in that folder -
+// nothing else needs to change.
 export const UPI_APPS = [
-  { key: 'gpay', label: 'Google Pay', color: '#1A73E8', monogram: 'G', urlField: 'gpayUrl' },
-  { key: 'phonepe', label: 'PhonePe', color: '#5F259F', monogram: 'Pe', urlField: 'phonepeUrl' },
-  { key: 'paytm', label: 'Paytm', color: '#00BAF2', monogram: 'P', urlField: 'paytmUrl' },
-  { key: 'amazonpay', label: 'Amazon Pay', color: '#232F3E', monogram: 'a', urlField: 'amazonPayUrl' },
-  { key: 'bhim', label: 'BHIM', color: '#ED6D24', monogram: 'B', urlField: 'bhimUrl' },
+  { key: 'gpay', label: 'Google Pay', icon: require('../../assets/upi-icons/gpay.png'), urlField: 'gpayUrl' },
+  { key: 'phonepe', label: 'PhonePe', icon: require('../../assets/upi-icons/phonepe.png'), urlField: 'phonepeUrl' },
+  { key: 'paytm', label: 'Paytm', icon: require('../../assets/upi-icons/paytm.png'), urlField: 'paytmUrl' },
+  { key: 'amazonpay', label: 'Amazon Pay', icon: require('../../assets/upi-icons/amazonpay.png'), urlField: 'amazonPayUrl' },
+  { key: 'bhim', label: 'BHIM', icon: require('../../assets/upi-icons/bhim.png'), urlField: 'bhimUrl' },
 ];

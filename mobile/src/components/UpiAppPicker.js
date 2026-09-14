@@ -1,4 +1,4 @@
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { UPI_APPS } from '../constants/upiApps';
 
 // Shared "choose your UPI app" grid - used by both SubmitPaymentScreen and
@@ -9,6 +9,15 @@ import { UPI_APPS } from '../constants/upiApps';
 // gpayUrl/phonepeUrl/paytmUrl/bhimUrl/amazonPayUrl/intentUrl - see
 // constants/upiApps.js and backend/src/services/paysharp.js for where each
 // one comes from); `onOpenApp` is usePaysharpPayment's own openSpecificApp.
+//
+// Renders each app's real logo (2026-09-14 - see upiApps.js's own comment
+// for where these come from) as a white rounded-rect card, NOT a circular
+// monogram tile like the earlier placeholder version - every one of these
+// five logos is a wide wordmark (nobody's Commons page has a clean square
+// glyph-only icon for all five), so a card that lets each logo's own
+// aspect ratio show through via resizeMode="contain" looks right for all
+// of them at once, matching how real gateway checkout pages (Razorpay,
+// PayU) show payment-method logos.
 export default function UpiAppPicker({ transaction, onOpenApp }) {
   return (
     <View style={styles.container}>
@@ -19,12 +28,9 @@ export default function UpiAppPicker({ transaction, onOpenApp }) {
             style={styles.tile}
             onPress={() => onOpenApp(transaction?.[app.urlField])}
           >
-            <View style={[styles.iconCircle, { backgroundColor: app.color }]}>
-              <Text style={styles.iconText}>{app.monogram}</Text>
+            <View style={styles.logoCard}>
+              <Image source={app.icon} style={styles.logoImage} resizeMode="contain" accessibilityLabel={app.label} />
             </View>
-            <Text style={styles.tileLabel} numberOfLines={1}>
-              {app.label}
-            </Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -49,31 +55,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 14,
+    gap: 10,
     marginBottom: 12,
   },
   tile: {
-    width: 76,
+    width: 104,
     alignItems: 'center',
-    gap: 6,
   },
-  iconCircle: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+  logoCard: {
+    width: 104,
+    height: 56,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e2e2e6',
+    backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
-  iconText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  tileLabel: {
-    fontSize: 12,
-    color: '#333',
-    fontWeight: '600',
-    textAlign: 'center',
+  logoImage: {
+    width: '100%',
+    height: '100%',
   },
   otherButton: {
     borderWidth: 1,
