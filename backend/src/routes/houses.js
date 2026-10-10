@@ -1,6 +1,7 @@
 const express = require('express');
 const authenticate = require('../middleware/authenticate');
 const supabaseAdmin = require('../config/supabaseAdmin');
+const { reconcileStaleGatewayOrders } = require('../services/transactionGateway');
 
 const router = express.Router();
 
@@ -626,6 +627,12 @@ router.get('/:houseId/transactions', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'House not found or not accessible.' });
   }
 
+  // Opportunistic self-healing (see reconcileStaleGatewayOrders's own
+  // comment in services/transactionGateway.js) - this screen is a direct
+  // route into a single house's history and does not necessarily go
+  // through GET /me first, so it gets its own reconcile call too.
+  await reconcileStaleGatewayOrders(supabaseAdmin, { houseIds: [houseId] });
+
   // transaction_allocations is embedded via its FK to transactions, so each
   // transaction shows exactly which billing period(s) it covers - a single
   // payment can span more than one (arrears catch-up, advance payments).
@@ -635,7 +642,7 @@ router.get('/:houseId/transactions', authenticate, async (req, res) => {
   const { data: transactions, error: transactionsError } = await supabase
     .from('transactions')
     .select(
-      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, description, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, house_id, submitted_by, amount, transaction_type, utr_number, payment_mode, payment_gateway, gateway_status, description, txn_date, payment_status, processing_status, verified_at, created_at, transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .eq('house_id', houseId)
     .order('created_at', { ascending: false });

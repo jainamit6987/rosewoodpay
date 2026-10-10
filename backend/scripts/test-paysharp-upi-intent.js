@@ -230,6 +230,39 @@ async function main() {
     maintenanceAttempt.body
   );
 
+  // --- New rule (2026-10-10, decided with the user after PaySharp support
+  //     confirmed an abandoned order always resolves within 10 minutes on
+  //     their own side): no second attempt of the same house+type is
+  //     allowed - gateway retry or manual self-report - while the first is
+  //     still Submitted. checkNoPendingGatewayOrder (routes/transactions.js)
+  //     is shared by both POST /upi-intent and POST /. ---
+  const secondMaintenanceGatewayAttempt = await post('/transactions/upi-intent', residentToken, {
+    house_id: house.id,
+    amount: BASE_AMOUNT,
+    transaction_type: 'Maintenance',
+    customer_mobile_no: '9876543210',
+  });
+  check(
+    'a second PaySharp order for the SAME house+type while the first is still Submitted is blocked (409)',
+    secondMaintenanceGatewayAttempt.status === 409 &&
+      /still under processing/i.test(secondMaintenanceGatewayAttempt.body.error || ''),
+    secondMaintenanceGatewayAttempt.body
+  );
+
+  const manualRetryAttempt = await post('/transactions', residentToken, {
+    house_id: house.id,
+    amount: BASE_AMOUNT,
+    transaction_type: 'Maintenance',
+    payment_mode: 'UPI',
+    utr_number: `${tag}MANUALRETRY`,
+  });
+  check(
+    'a manual self-report for the SAME house+type is ALSO blocked while the gateway order is Submitted (409) - closes the route-around-it gap',
+    manualRetryAttempt.status === 409 && /still under processing/i.test(manualRetryAttempt.body.error || ''),
+    manualRetryAttempt.body
+  );
+  if (manualRetryAttempt.body.id) createdTransactionIds.push(manualRetryAttempt.body.id);
+
   const waterChargeAttempt = await post('/transactions/upi-intent', residentToken, {
     house_id: house.id,
     amount: 137.5,
@@ -280,9 +313,30 @@ async function main() {
   }
 
   // --- GET /:id/status on a plain, non-gateway transaction - never
-  //     touches PaySharp at all, since payment_gateway is NULL. ---
+  //     touches PaySharp at all, since payment_gateway is NULL. Uses its
+  //     OWN throwaway house, isolated from `house` above - both of
+  //     `house`'s transaction_types (Maintenance, WaterCharge) now have a
+  //     real pending PaySharp order sitting Submitted on it, which the new
+  //     2026-10-10 duplicate-order guard correctly blocks a manual
+  //     self-report into, same house+type - exactly what
+  //     'a manual self-report for the SAME house+type is ALSO blocked...'
+  //     above already proves; reusing `house` here would just hit that
+  //     same block again instead of testing what this check actually
+  //     wants (a manual submission with no gateway involvement at all). ---
+  const { data: manualOnlyHouse } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: `${tag}M`, type: 'Flat', default_monthly_amount: BASE_AMOUNT })
+    .select('id')
+    .single();
+  await supabaseAdmin.from('resident_house_assignments').insert({
+    society_member_id: RESIDENT_MEMBER_ID,
+    house_id: manualOnlyHouse.id,
+    status: 'Active',
+    approved_at: new Date().toISOString(),
+  });
+
   const manualSubmission = await post('/transactions', residentToken, {
-    house_id: house.id,
+    house_id: manualOnlyHouse.id,
     amount: BASE_AMOUNT,
     transaction_type: 'Maintenance',
     payment_mode: 'UPI',
@@ -434,8 +488,8 @@ async function main() {
     await supabaseAdmin.from('audit_events').delete().eq('entity_id', transactionId);
     await supabaseAdmin.from('transactions').delete().eq('id', transactionId);
   }
-  await supabaseAdmin.from('resident_house_assignments').delete().eq('house_id', house.id);
-  await supabaseAdmin.from('houses').delete().in('id', [house.id, unassignedHouse.id]);
+  await supabaseAdmin.from('resident_house_assignments').delete().in('house_id', [house.id, manualOnlyHouse.id]);
+  await supabaseAdmin.from('houses').delete().in('id', [house.id, unassignedHouse.id, manualOnlyHouse.id]);
 
   process.exit(failCount > 0 ? 1 : 0);
 }

@@ -215,12 +215,26 @@ export default function DuesScreen({ houseId, cashForHouse, onPayHouse, onBack }
                   )}
                   {entry.periods.map((period) => {
                     if (period.hasPendingSubmission) {
+                      // A PaySharp gateway order has a known, PaySharp-
+                      // confirmed resolution window (always resolves within
+                      // 10 minutes, even if abandoned - confirmed directly
+                      // with PaySharp support, 2026-10-10) - genuinely
+                      // different from a self-reported UPI/NEFT/Cheque
+                      // submission, which has no fixed timeline and really
+                      // is just awaiting a human Admin's review. Shown with
+                      // its own distinct wording rather than the generic
+                      // "Awaiting review", which would be misleading here
+                      // (no human review happens for these at all - see
+                      // backend/src/routes/me.js's pendingSubmissionGateway).
+                      const isGatewayPending = period.pendingSubmissionGateway;
                       return (
                         <View key={period.id} style={[styles.periodRow, styles.periodRowPending]}>
                           <View style={styles.periodRowLeft}>
                             <Text style={styles.periodMonth}>{formatMonth(period.period_month)}</Text>
                             <View style={styles.pendingBadge}>
-                              <Text style={styles.pendingBadgeText}>Awaiting review</Text>
+                              <Text style={styles.pendingBadgeText}>
+                                {isGatewayPending ? 'Waiting for Payment Gateway Confirmation' : 'Awaiting review'}
+                              </Text>
                             </View>
                           </View>
                           <Text style={styles.periodAmount}>{formatMoney(period.amount_due)}</Text>
@@ -247,10 +261,24 @@ export default function DuesScreen({ houseId, cashForHouse, onPayHouse, onBack }
                     );
                   })}
                   {selectablePeriods.length === 0 ? (
-                    <Text style={styles.pendingHint}>
-                      A payment for {entry.periods.length === 1 ? 'this month' : 'these months'} has already been
-                      submitted and is awaiting admin review.
-                    </Text>
+                    (() => {
+                      // Every blocked period shares the same transaction's
+                      // allocations in practice (one multi-month payment's
+                      // FIFO run always blocks a contiguous leading set,
+                      // per this file's own comment above) - checking "are
+                      // they ALL gateway-pending" is a safe simplification,
+                      // not a guess.
+                      const blockedPeriods = entry.periods.filter((p) => p.hasPendingSubmission);
+                      const allGateway = blockedPeriods.length > 0 && blockedPeriods.every((p) => p.pendingSubmissionGateway);
+                      const monthsWord = entry.periods.length === 1 ? 'this month' : 'these months';
+                      return (
+                        <Text style={styles.pendingHint}>
+                          {allGateway
+                            ? `A payment for ${monthsWord} is waiting for payment gateway confirmation - PaySharp always confirms within 15 minutes. Pull down to refresh.`
+                            : `A payment for ${monthsWord} has already been submitted and is awaiting admin review.`}
+                        </Text>
+                      );
+                    })()
                   ) : (
                     <TouchableOpacity
                       style={styles.payButton}

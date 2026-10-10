@@ -52,6 +52,17 @@ function statusTextStyle(status) {
   return styles.badgeTextPending;
 }
 
+// Same distinction as MyTransactionsScreen's own statusBadgeLabel - a
+// PaySharp gateway order still sitting Submitted is waiting on PaySharp's
+// own automated confirmation (always resolves within 10 minutes, even if
+// abandoned), not a human Admin with no fixed timeline.
+function statusBadgeLabel(transaction) {
+  if (transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp') {
+    return 'Gateway Pending';
+  }
+  return transaction.processing_status;
+}
+
 // Resident-facing "pay for extra water" flow - the new S.No item requested
 // alongside the Admin's own Cash-recording counterpart on
 // HouseDashboardScreen. Deliberately its own screen, not folded into
@@ -229,17 +240,13 @@ export default function WaterChargeScreen({ house, society, onBack }) {
             <View style={styles.waitingBox}>
               {paysharp.state !== 'timeout' ? <ActivityIndicator size="small" color="#1a73e8" /> : null}
               <Text style={styles.waitingTitle}>
-                {paysharp.state === 'creating'
-                  ? 'Creating your payment request\u2026'
-                  : paysharp.state === 'timeout'
-                  ? "Still haven't heard back"
-                  : 'Choose your UPI app to pay'}
+                {paysharp.state === 'creating' ? 'Creating your payment request\u2026' : 'Waiting for Payment Gateway Confirmation'}
               </Text>
               <Text style={styles.waitingSubtitle}>
                 {paysharp.state === 'creating'
                   ? 'Just a moment.'
                   : paysharp.state === 'timeout'
-                  ? 'If you completed the payment, tap Check again.'
+                  ? "This can take up to 15 minutes to confirm, even if you already paid. If you completed the payment, tap Check again - otherwise you can safely leave this screen, we'll keep watching for the result, and you can retry once it resolves."
                   : 'Tap the app you have below - this updates on its own once you pay.'}
               </Text>
               {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
@@ -252,7 +259,11 @@ export default function WaterChargeScreen({ house, society, onBack }) {
               ) : null}
               {paysharp.error ? <Text style={styles.error}>{paysharp.error}</Text> : null}
               <TouchableOpacity onPress={paysharp.reset}>
-                <Text style={styles.tryAgainLink}>Cancel</Text>
+                {/* Not a real cancel - the underlying PaySharp order keeps running
+                    either way and cannot be stopped from here (see the 2026-10-10
+                    progress log entry). This only resets this screen's own local
+                    waiting UI back to the form. */}
+                <Text style={styles.tryAgainLink}>Back - I'll check later</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -375,12 +386,16 @@ export default function WaterChargeScreen({ house, society, onBack }) {
               <View style={styles.historyCardHeader}>
                 <Text style={styles.historyAmount}>{formatMoney(txn.amount)}</Text>
                 <View style={[styles.badge, statusBadgeStyle(txn.processing_status)]}>
-                  <Text style={[styles.badgeText, statusTextStyle(txn.processing_status)]}>{txn.processing_status}</Text>
+                  <Text style={[styles.badgeText, statusTextStyle(txn.processing_status)]}>{statusBadgeLabel(txn)}</Text>
                 </View>
               </View>
               <Text style={styles.historyMeta}>
-                {txn.payment_mode === 'Cash' ? 'Cash' : `UTR ${txn.utr_number}`} \u2022{' '}
-                {formatDate(txn.txn_date || txn.created_at)}
+                {txn.payment_mode === 'Cash'
+                  ? 'Cash'
+                  : txn.payment_gateway === 'paysharp' && !txn.utr_number
+                  ? 'UTR pending gateway confirmation'
+                  : `UTR ${txn.utr_number}`}{' '}
+                \u2022 {formatDate(txn.txn_date || txn.created_at)}
               </Text>
               {txn.description ? <Text style={styles.historyMeta}>{txn.description}</Text> : null}
             </View>

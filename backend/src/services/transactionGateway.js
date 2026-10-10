@@ -248,4 +248,77 @@ async function applyGatewayOutcome(supabaseAdmin, orderId) {
   return { transaction: updated, applied: false };
 }
 
-module.exports = { applyGatewayOutcome };
+// PaySharp's own support confirmed (2026-10-10, in response to a direct
+// question raised after a resident got stuck on an abandoned UPI Intent
+// order) that an unclaimed/abandoned order is *always* resolved to
+// FAILED/EXPIRED on their side within 10 minutes - there is no "forever
+// pending" case on PaySharp's own end, even if nobody ever opens the UPI
+// app at all. A 15-minute threshold here (not 10) is a deliberate 5-minute
+// safety margin on top of PaySharp's own guarantee, not a second
+// independent guess - this never marks anything failed on our own
+// authority; it only decides when it's worth asking PaySharp again.
+const STALE_GATEWAY_ORDER_MS = 15 * 60 * 1000;
+
+// Opportunistic self-healing for abandoned PaySharp orders. Problem this
+// solves: the mobile app's own poll (usePaysharpPayment.js) gives up after
+// 3 minutes and never touches the database again, and PaySharp's webhook
+// is the only other thing that would ever resolve a row left Submitted -
+// if a resident simply closes the tab and never returns, and the webhook
+// delivery is ever missed/delayed, that row (and the billing period it
+// blocks via hasPendingSubmission/the new duplicate-order guard in
+// routes/transactions.js) could sit stuck indefinitely with nothing to
+// prompt a fresh check.
+//
+// Deliberately NOT a cron job / setInterval: this service runs on Cloud
+// Run, which can scale this instance to zero between requests - an
+// in-process timer is not guaranteed to ever fire. Instead, this piggybacks
+// on routes that are already being called for an unrelated reason (GET
+// /me when a resident opens their dues, GET /transactions/pending when an
+// Admin opens the review queue) - the next time either happens after
+// PaySharp's own 10-minute window has passed, this quietly re-confirms the
+// real outcome before the page's own data is read, so the stale lock
+// clears itself with zero new screens/buttons and no dependency on the
+// webhook alone having worked.
+//
+// Scope the lookup to the caller's own houseIds/societyIds (never the
+// whole table) - this always runs inside an already-authenticated request
+// for a specific resident/admin's own data, so there's no reason to touch
+// rows outside what that request already needed to look at anyway. Safe to
+// call with neither filter (a no-op, matches zero rows) and safe to call
+// when there is nothing stale (empty result, returns immediately). Errors
+// on an individual order are logged and skipped rather than thrown - this
+// is a courtesy reconciliation layered on top of the webhook's own primary
+// job, never something that should be allowed to break the actual page a
+// caller is loading.
+async function reconcileStaleGatewayOrders(supabaseAdmin, { houseIds, societyIds } = {}) {
+  if ((!houseIds || houseIds.length === 0) && (!societyIds || societyIds.length === 0)) {
+    return;
+  }
+
+  let query = supabaseAdmin
+    .from('transactions')
+    .select('id, paysharp_order_id')
+    .eq('payment_gateway', 'paysharp')
+    .eq('processing_status', 'Submitted')
+    .lt('created_at', new Date(Date.now() - STALE_GATEWAY_ORDER_MS).toISOString());
+
+  if (houseIds && houseIds.length > 0) query = query.in('house_id', houseIds);
+  if (societyIds && societyIds.length > 0) query = query.in('society_id', societyIds);
+
+  const { data: staleOrders, error } = await query;
+  if (error) {
+    console.error('reconcileStaleGatewayOrders: lookup failed:', error.message);
+    return;
+  }
+  if (!staleOrders || staleOrders.length === 0) return;
+
+  for (const order of staleOrders) {
+    try {
+      await applyGatewayOutcome(supabaseAdmin, order.paysharp_order_id);
+    } catch (err) {
+      console.error(`reconcileStaleGatewayOrders: failed for order ${order.paysharp_order_id}:`, err.message);
+    }
+  }
+}
+
+module.exports = { applyGatewayOutcome, reconcileStaleGatewayOrders };

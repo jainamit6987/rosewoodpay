@@ -33,7 +33,11 @@ function formatMonth(periodMonth) {
 // this list stays correct if that ever changes, and for consistency with
 // the other transaction-list screens.
 function formatPaymentReference(transaction) {
-  return transaction.payment_mode === 'Cash' ? 'Cash' : `UTR ${transaction.utr_number}`;
+  if (transaction.payment_mode === 'Cash') return 'Cash';
+  if (transaction.payment_gateway === 'paysharp' && !transaction.utr_number) {
+    return 'UTR pending gateway confirmation';
+  }
+  return `UTR ${transaction.utr_number}`;
 }
 
 // Same as MyTransactionsScreen's own describeAllocations - names the actual
@@ -230,6 +234,14 @@ export default function AdminReviewScreen({ isAdmin, onBack }) {
                     <View style={styles.detailBox}>
                       <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
                       <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                      {transaction.payment_gateway === 'paysharp' ? (
+                        <Text style={styles.detailText}>
+                          This is a PaySharp instant-UPI order, not a self-reported UTR - PaySharp will confirm it
+                          automatically (Success or Failed/Expired) within 15 minutes, with no review needed here.
+                          Only reject manually if you're confident the resident has abandoned it and don't want to
+                          wait.
+                        </Text>
+                      ) : null}
                     </View>
                   ) : null}
                 </TouchableOpacity>

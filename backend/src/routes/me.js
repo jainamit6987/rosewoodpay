@@ -1,5 +1,7 @@
 const express = require('express');
 const authenticate = require('../middleware/authenticate');
+const supabaseAdmin = require('../config/supabaseAdmin');
+const { reconcileStaleGatewayOrders } = require('../services/transactionGateway');
 
 const router = express.Router();
 
@@ -67,6 +69,18 @@ router.get('/', authenticate, async (req, res) => {
     }
 
     const houseIds = assignments.map((a) => a.houses?.id).filter(Boolean);
+
+    // Opportunistic self-healing (see reconcileStaleGatewayOrders's own
+    // comment in services/transactionGateway.js) - re-confirms any PaySharp
+    // order on this member's own houses that has sat Submitted for well
+    // past PaySharp's own confirmed 10-minute order-expiry window, before
+    // openBillingPeriods/hasPendingSubmission below are computed, so a
+    // truly-abandoned payment clears its own billing-period lock the
+    // moment the resident opens their dues again, with no dependency on
+    // the webhook alone having been delivered.
+    if (houseIds.length > 0) {
+      await reconcileStaleGatewayOrders(supabaseAdmin, { houseIds });
+    }
 
     // "Current billing period" for the resident dashboard means this
     // calendar month's own period, whatever its status - distinct from the
@@ -153,10 +167,18 @@ router.get('/', authenticate, async (req, res) => {
       // so there is nothing to flag for either of those.
       const periodIds = periods.map((period) => period.id);
       let pendingPeriodIds = new Set();
+      // Gateway-originated pending periods get their own, more accurate
+      // "waiting for payment gateway confirmation" wording on the mobile
+      // Dues screen - a PaySharp order has a known, PaySharp-confirmed
+      // resolution window (10 minutes, plus this app's own 5-minute safety
+      // margin - see reconcileStaleGatewayOrders), unlike a self-reported
+      // UPI/NEFT/Cheque submission, which genuinely has no fixed timeline
+      // and really is just awaiting a human Admin's review.
+      let pendingPeriodIdsGateway = new Set();
       if (periodIds.length > 0) {
         const { data: pendingAllocations, error: pendingError } = await supabase
           .from('transaction_allocations')
-          .select('billing_period_id, transactions!inner(processing_status)')
+          .select('billing_period_id, transactions!inner(processing_status, payment_gateway)')
           .in('billing_period_id', periodIds)
           .eq('transactions.processing_status', 'Submitted');
 
@@ -164,11 +186,17 @@ router.get('/', authenticate, async (req, res) => {
           return res.status(500).json({ error: pendingError.message });
         }
         pendingPeriodIds = new Set((pendingAllocations || []).map((allocation) => allocation.billing_period_id));
+        pendingPeriodIdsGateway = new Set(
+          (pendingAllocations || [])
+            .filter((allocation) => allocation.transactions?.payment_gateway === 'paysharp')
+            .map((allocation) => allocation.billing_period_id)
+        );
       }
 
       billingPeriods = periods.map((period) => ({
         ...period,
         hasPendingSubmission: pendingPeriodIds.has(period.id),
+        pendingSubmissionGateway: pendingPeriodIdsGateway.has(period.id),
       }));
     }
 

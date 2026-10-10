@@ -1,0 +1,35 @@
+-- New business rule (2026-10-10, decided directly with the user after
+-- PaySharp support confirmed their own behavior for an abandoned/unclaimed
+-- UPI Intent order): a house may have at most ONE PaySharp gateway order
+-- sitting Submitted per transaction_type (Maintenance / WaterCharge) at any
+-- point in time - a resident must wait for PaySharp's own definitive
+-- outcome (which PaySharp guarantees within 10 minutes, even for an order
+-- nobody ever opened) before a new attempt of the same type is allowed on
+-- that house. This closes a real gap: without it, a resident could start a
+-- second gateway order for the same house+type while the first was still
+-- live, risking either two transactions racing to allocate against the
+-- same billing period, or a late SUCCESS on the abandoned first order
+-- arriving after a second has already gone through unnoticed.
+--
+-- Enforced primarily in application code
+-- (backend/src/routes/transactions.js's POST /upi-intent, checked before
+-- any PaySharp API call so a blocked attempt never orphans a real order on
+-- PaySharp's own side) - this partial unique index is the belt-and-
+-- suspenders DB-level backstop against a race between two concurrent
+-- requests for the same house+type both passing that app-layer check at
+-- the same instant, same reasoning as unique_active_tenant_per_house
+-- (20260914000000) and unique_active_assignment_per_member_house
+-- (20260724100000).
+--
+-- If this migration fails to apply, live data already has a house with 2+
+-- simultaneously-Submitted PaySharp orders of the same transaction_type -
+-- run this first to find the offending house(s) and resolve down to one
+-- (reject the stale one via POST /transactions/:id/reject) before retrying:
+--   SELECT house_id, transaction_type, count(*)
+--   FROM transactions
+--   WHERE payment_gateway = 'paysharp' AND processing_status = 'Submitted'
+--   GROUP BY house_id, transaction_type
+--   HAVING count(*) > 1;
+CREATE UNIQUE INDEX unique_pending_paysharp_order_per_house_type
+ON transactions (house_id, transaction_type)
+WHERE (payment_gateway = 'paysharp' AND processing_status = 'Submitted');

@@ -153,17 +153,13 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
       <View style={styles.centered}>
         {paysharp.state !== 'timeout' ? <ActivityIndicator size="large" color="#1a73e8" /> : null}
         <Text style={styles.successTitle}>
-          {paysharp.state === 'creating'
-            ? 'Creating your payment request\u2026'
-            : paysharp.state === 'timeout'
-            ? "Still haven't heard back"
-            : 'Choose your UPI app to pay'}
+          {paysharp.state === 'creating' ? 'Creating your payment request\u2026' : 'Waiting for Payment Gateway Confirmation'}
         </Text>
         <Text style={styles.subtitle}>
           {paysharp.state === 'creating'
             ? 'Just a moment.'
             : paysharp.state === 'timeout'
-            ? "This is taking longer than usual. If you completed the payment, tap Check again - otherwise you can cancel and use the self-report option below instead."
+            ? "This can take up to 15 minutes to confirm, even if you already paid. If you completed the payment, tap Check again - otherwise you can leave this screen, we'll keep watching for the result, and you can retry once it resolves (the self-report option below also stays unavailable for this same payment until then)."
             : "Tap the app you have below - the amount is already filled in. This screen updates on its own once you pay, or tap Check now."}
         </Text>
         {['waiting', 'polling', 'timeout'].includes(paysharp.state) ? (
@@ -176,7 +172,10 @@ export default function SubmitPaymentScreen({ house, society, selectedPeriods, p
         ) : null}
         {paysharp.error ? <Text style={styles.error}>{paysharp.error}</Text> : null}
         <TouchableOpacity style={styles.cancelButton} onPress={paysharp.reset}>
-          <Text style={styles.cancelButtonText}>Cancel</Text>
+          {/* Not a real cancel - the underlying PaySharp order keeps running either way
+              and cannot be stopped from here (see the 2026-10-10 progress log entry).
+              This only resets this screen's own local waiting UI back to the form. */}
+          <Text style={styles.cancelButtonText}>Back - I'll check later</Text>
         </TouchableOpacity>
       </View>
     );

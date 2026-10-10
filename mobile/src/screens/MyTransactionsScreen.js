@@ -25,11 +25,17 @@ function formatMonth(periodMonth) {
 
 // Cash payments (Admin-recorded, see routes/transactions.js) never have a
 // utr_number - it stays NULL, since there is no bank reference for a
-// physical cash handover. Showing "UTR null" there would read as a data
-// bug rather than the expected absence, so this names the payment mode
-// itself instead whenever there is no UTR to show.
+// physical cash handover. A PaySharp gateway order also has no utr_number
+// until PaySharp actually confirms SUCCESS (see transactionGateway.js) -
+// while still Submitted, there is genuinely nothing to show yet. Showing
+// "UTR null" in either case would read as a data bug rather than the
+// expected absence, so both are named explicitly instead.
 function formatPaymentReference(transaction) {
-  return transaction.payment_mode === 'Cash' ? 'Cash' : `UTR ${transaction.utr_number}`;
+  if (transaction.payment_mode === 'Cash') return 'Cash';
+  if (transaction.payment_gateway === 'paysharp' && !transaction.utr_number) {
+    return 'UTR pending gateway confirmation';
+  }
+  return `UTR ${transaction.utr_number}`;
 }
 
 // Names the actual month(s) this payment was allocated to, not just a
@@ -71,6 +77,23 @@ function statusTextStyle(status) {
   if (status === 'Verified') return styles.badgeTextVerified;
   if (status === 'Rejected' || status === 'Failed') return styles.badgeTextRejected;
   return styles.badgeTextPending;
+}
+
+// A PaySharp gateway order still sitting Submitted means something
+// genuinely different from a self-reported UPI/NEFT/Cheque submission
+// sitting Submitted - the former is waiting on PaySharp's own automated
+// confirmation (always resolves within 10 minutes, even if abandoned - see
+// the 2026-10-10 progress log entry), the latter on a human Admin with no
+// fixed timeline. The plain "Submitted" badge text does not distinguish
+// these at all, which previously read as confusing/misleading for a
+// gateway order - this keeps the badge itself short (table column is
+// narrow) while the full phrase the user asked for shows in the expanded
+// detail box below.
+function statusBadgeLabel(transaction) {
+  if (transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp') {
+    return 'Gateway Pending';
+  }
+  return transaction.processing_status;
 }
 
 // The resident-facing "My Transactions" tile off ResidentHomeScreen -
@@ -182,7 +205,7 @@ export default function MyTransactionsScreen({ house, onBack }) {
                   <View style={[styles.colStatus, styles.cellStatusWrap]}>
                     <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
                       <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
-                        {transaction.processing_status}
+                        {statusBadgeLabel(transaction)}
                       </Text>
                     </View>
                   </View>
@@ -191,6 +214,11 @@ export default function MyTransactionsScreen({ house, onBack }) {
                   <View style={styles.detailBox}>
                     <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
                     <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                    {transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp' ? (
+                      <Text style={styles.detailText}>
+                        Waiting for Payment Gateway Confirmation - PaySharp always confirms within 15 minutes.
+                      </Text>
+                    ) : null}
                   </View>
                 ) : null}
               </TouchableOpacity>

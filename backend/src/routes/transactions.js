@@ -4,7 +4,7 @@ const authenticate = require('../middleware/authenticate');
 const supabaseAdmin = require('../config/supabaseAdmin');
 const { closeFullyPaidPeriods } = require('../services/billingPeriods');
 const paysharp = require('../services/paysharp');
-const { applyGatewayOutcome } = require('../services/transactionGateway');
+const { applyGatewayOutcome, reconcileStaleGatewayOrders } = require('../services/transactionGateway');
 
 const router = express.Router();
 
@@ -142,6 +142,46 @@ async function checkActiveHouseAssignment(supabase, house_id) {
       errorStatus: 403,
       errorBody: {
         error: 'No active house assignment visible for this house. Confirm you have an approved, active assignment to it.',
+      },
+    };
+  }
+  return {};
+}
+
+// Shared by both POST / (manual self-report) and POST /upi-intent (gateway)
+// below - decided directly with the user (2026-10-10) after PaySharp
+// support confirmed an abandoned/unclaimed order always resolves to
+// FAILED/EXPIRED on their own side within 10 minutes: a resident must wait
+// for PaySharp's own definitive outcome before ANY new submission (gateway
+// retry or manual self-report) of the same house+transaction_type is
+// allowed, rather than letting a second attempt race the first - which
+// risks two transactions both ending up allocated against the same
+// billing period, or a late SUCCESS on the first arriving after a second
+// has already gone through unnoticed. Scoped to house_id, not
+// submitted_by - a house's dues are a property of the house, not any one
+// individual co-assignee. Backed by the DB-level
+// unique_pending_paysharp_order_per_house_type partial unique index
+// (20261010000000) as a race backstop against two requests passing this
+// same check at the same instant.
+async function checkNoPendingGatewayOrder(supabase, house_id, transaction_type) {
+  const { data: alreadyPendingGatewayOrder, error: pendingLookupError } = await supabase
+    .from('transactions')
+    .select('id')
+    .eq('house_id', house_id)
+    .eq('transaction_type', transaction_type)
+    .eq('payment_gateway', 'paysharp')
+    .eq('processing_status', 'Submitted')
+    .maybeSingle();
+
+  if (pendingLookupError) {
+    return { errorStatus: 500, errorBody: { error: pendingLookupError.message } };
+  }
+  if (alreadyPendingGatewayOrder) {
+    return {
+      errorStatus: 409,
+      errorBody: {
+        error: 'Last Txn is still under processing. Please wait for 15 mins then check or retry.',
+        transactionId: alreadyPendingGatewayOrder.id,
       },
     };
   }
@@ -519,6 +559,20 @@ router.post('/', authenticate, async (req, res) => {
     return res.status(assignmentResult.errorStatus).json(assignmentResult.errorBody);
   }
 
+  // Deliberately NOT applied to Cash: an Admin recording a Cash payment is
+  // a direct, in-person attestation of money already received, not a
+  // resident-initiated retry, and is left as the one deliberate override an
+  // Admin can still use regardless. Otherwise applied here too, so a
+  // resident can't just route around the same guard on POST /upi-intent
+  // below by switching to this manual self-report form (same house, same
+  // type) while their instant-UPI attempt is still pending.
+  if (resolvedPaymentMode !== CASH_MODE) {
+    const pendingGatewayCheck = await checkNoPendingGatewayOrder(supabase, house_id, resolvedTransactionType);
+    if (pendingGatewayCheck.errorStatus) {
+      return res.status(pendingGatewayCheck.errorStatus).json(pendingGatewayCheck.errorBody);
+    }
+  }
+
   // Base-amount-multiple rule (Maintenance only) plus the FIFO
   // billing-period allocation - see computeAllocations above.
   // WaterCharge deliberately never touches billing_periods at all - see
@@ -704,6 +758,14 @@ router.post('/upi-intent', authenticate, async (req, res) => {
     return res.status(assignmentResult.errorStatus).json(assignmentResult.errorBody);
   }
 
+  // See checkNoPendingGatewayOrder's own comment - checked here, before any
+  // PaySharp API call, so a blocked attempt never creates an orphaned real
+  // order on PaySharp's own side.
+  const pendingGatewayCheck = await checkNoPendingGatewayOrder(supabase, house_id, resolvedTransactionType);
+  if (pendingGatewayCheck.errorStatus) {
+    return res.status(pendingGatewayCheck.errorStatus).json(pendingGatewayCheck.errorBody);
+  }
+
   const allocationsResult = await computeAllocations(supabase, house, resolvedTransactionType, amount);
   if (allocationsResult.errorStatus) {
     return res.status(allocationsResult.errorStatus).json(allocationsResult.errorBody);
@@ -801,6 +863,18 @@ router.post('/upi-intent', authenticate, async (req, res) => {
     .single();
 
   if (insertError) {
+    // Race-condition backstop for the app-layer check above (two requests
+    // for the same house+type both passing it before either inserts) -
+    // unique_pending_paysharp_order_per_house_type
+    // (20261010000000_unique_pending_paysharp_order_per_house_type.sql).
+    // The PaySharp order itself is already created at this point regardless
+    // (orphaned from our side, but harmless - it simply expires unpaid on
+    // PaySharp's own 10-minute timer).
+    if (insertError.code === PG_UNIQUE_VIOLATION) {
+      return res.status(409).json({
+        error: 'Last Txn is still under processing. Please wait for 15 mins then check or retry.',
+      });
+    }
     // The PaySharp order already exists at this point (orphaned from our
     // side, but harmless - it will simply expire unpaid, or a paid one can
     // be manually reconciled via paysharp_order_id below). Surfaced with
@@ -885,10 +959,19 @@ router.get('/pending', authenticate, async (req, res) => {
     });
   }
 
+  // Opportunistic self-healing (see reconcileStaleGatewayOrders's own
+  // comment) - re-confirms any PaySharp order in this admin's own
+  // societies that has sat Submitted for well past PaySharp's own
+  // confirmed 10-minute order-expiry window, before this queue is read, so
+  // a truly-abandoned one clears itself the moment an Admin opens this
+  // screen rather than needing a webhook delivery or a resident's own
+  // long-gone poll to have caught it first.
+  await reconcileStaleGatewayOrders(supabaseAdmin, { societyIds });
+
   const { data: pending, error: pendingError } = await supabase
     .from('transactions')
     .select(
-      'id, society_id, house_id, submitted_by, amount, transaction_type, direction, utr_number, payment_mode, payee_name, description, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
+      'id, society_id, house_id, submitted_by, amount, transaction_type, direction, utr_number, payment_mode, payment_gateway, gateway_status, payee_name, description, txn_date, processing_status, created_at, houses(house_number), transaction_allocations(billing_period_id, amount_allocated, billing_periods(period_month))'
     )
     .in('society_id', societyIds)
     .eq('processing_status', 'Submitted')
