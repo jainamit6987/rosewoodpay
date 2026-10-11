@@ -389,7 +389,13 @@ function AuthenticatedApp() {
   }
 
   if (showHouses) {
-    return <HousesScreen onBack={() => setShowHouses(false)} onSelectHouse={setHouseDashboardTarget} />;
+    return (
+      <HousesScreen
+        societyId={membership.society?.id}
+        onBack={() => setShowHouses(false)}
+        onSelectHouse={setHouseDashboardTarget}
+      />
+    );
   }
 
   if (showCreateMember) {

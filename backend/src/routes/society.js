@@ -593,6 +593,112 @@ router.get('/:id/pendency-report', authenticate, async (req, res) => {
   res.json({ month: targetMonth, houses });
 });
 
+// "As of today, which color bucket does this house fall into" - the
+// Houses screen's grid color rule, confirmed with the user:
+//   Day <= 10 of the month: the CURRENT month's own due is still within
+//     grace and does NOT count - only months strictly BEFORE the current
+//     month count toward the color.
+//   Day >= 11 of the month: grace is over - the current month's own due
+//     (if unpaid) DOES count, same as any older unpaid month.
+//   Whichever "months due" count results: 0 -> green, 1 -> yellow, 2+ -> red.
+// Computed server-side, once, rather than shipping raw counts for every
+// client screen to reinterpret - same reasoning as GET /me's own
+// hasPendingSubmission. Day-of-month is read in UTC, same as every other
+// date boundary in this file (startOfCurrentMonthUtc) - a society's own
+// `timezone` column is purely informational today (see PATCH /:id above),
+// not wired into any date-boundary logic yet, so this intentionally stays
+// consistent with that rather than introducing a one-off local-time path.
+function duesBucket(overdueMonths, currentMonthDue, dayOfMonth) {
+  const dueMonths = dayOfMonth <= 10 ? overdueMonths : overdueMonths + (currentMonthDue ? 1 : 0);
+  if (dueMonths <= 0) return 'green';
+  if (dueMonths === 1) return 'yellow';
+  return 'red';
+}
+
+// GET /society/:id/houses-dues-grid - Admin or Committee (same view-only
+// split as every other report in this file). Powers the Houses screen's
+// color-coded grid. Deliberately NOT the pendency-report above reused
+// as-is: that endpoint is a "who still owes money" list and omits a
+// fully-paid house entirely by design (see its own comment above) - this
+// one needs to return EVERY house in the society, since the grid renders
+// one tile per house regardless of dues status.
+//
+// Reuses the pendency-report's own "Open periods with period_month <= this
+// month" query shape, but additionally tracks whether the CURRENT month's
+// own period is itself among the open ones (currentMonthDue) - the color
+// rule above treats that one differently depending on the day of the
+// month, which the pendency-report's own overdueMonths count (periods
+// strictly BEFORE the target month) never needed to distinguish.
+router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
+  const supabase = req.supabase;
+  const { id: societyId } = req.params;
+
+  let callerAllowed;
+  try {
+    callerAllowed = await requireActiveAdminOrCommittee(supabase, req.user.id, societyId);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  if (!callerAllowed) {
+    return res.status(403).json({ error: 'Only an Admin or Committee member can view the houses dues grid.' });
+  }
+
+  const { data: houses, error: housesError } = await supabase
+    .from('houses')
+    .select('id, house_number, owner_name, status')
+    .eq('society_id', societyId)
+    .order('house_number', { ascending: true });
+
+  if (housesError) {
+    return res.status(500).json({ error: housesError.message });
+  }
+
+  const now = new Date();
+  const currentMonthDateOnly = toDateOnly(startOfCurrentMonthUtc());
+  const dayOfMonth = now.getUTCDate();
+
+  const dueByHouseId = new Map();
+  if ((houses || []).length > 0) {
+    const { data: openPeriods, error: periodsError } = await supabase
+      .from('billing_periods')
+      .select('house_id, period_month')
+      .eq('society_id', societyId)
+      .eq('status', 'Open')
+      .lte('period_month', currentMonthDateOnly);
+
+    if (periodsError) {
+      return res.status(500).json({ error: periodsError.message });
+    }
+
+    for (const period of openPeriods || []) {
+      if (!dueByHouseId.has(period.house_id)) {
+        dueByHouseId.set(period.house_id, { overdueMonths: 0, currentMonthDue: false });
+      }
+      const entry = dueByHouseId.get(period.house_id);
+      if (period.period_month < currentMonthDateOnly) {
+        entry.overdueMonths += 1;
+      } else {
+        entry.currentMonthDue = true;
+      }
+    }
+  }
+
+  const result = (houses || []).map((house) => {
+    const due = dueByHouseId.get(house.id) || { overdueMonths: 0, currentMonthDue: false };
+    return {
+      id: house.id,
+      house_number: house.house_number,
+      owner_name: house.owner_name,
+      status: house.status,
+      overdueMonths: due.overdueMonths,
+      currentMonthDue: due.currentMonthDue,
+      bucket: duesBucket(due.overdueMonths, due.currentMonthDue, dayOfMonth),
+    };
+  });
+
+  res.json({ asOfDate: toDateOnly(now), houses: result });
+});
+
 // Plain English month name lookup for the description this endpoint
 // synthesizes for Maintenance rows (below) - not locale-aware on purpose,
 // unlike the mobile client's own Intl.toLocaleDateString formatting, since

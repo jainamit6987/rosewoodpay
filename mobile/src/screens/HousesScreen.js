@@ -1,107 +1,132 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { apiGet } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
-const SEARCH_DEBOUNCE_MS = 350;
-const MAX_SEARCH_RESULTS = 5; // kept in sync with backend/src/routes/houses.js's own cap
+// ─────────────────────────────────────────────────────────────────────────
+// A color-coded grid - one small tile per house - so an Admin/Committee
+// member can see the whole society's dues status at a glance (this society
+// alone has 125 houses, so the grid is sized dense enough that most fit
+// per screen, with scrolling for the rest). Previously a search-only
+// detail-card list (see Society_App_Progress_Log.md) - that mode still
+// exists here as the search box below, just filtering the grid instead of
+// hitting a separate search endpoint, since the whole dataset is already
+// in hand.
+//
+// All color logic is computed server-side by GET /society/:id/houses-dues-
+// grid (backend/src/routes/society.js) - this screen just renders whatever
+// `bucket` each house comes back with, rather than re-deriving it
+// client-side. That endpoint's own comment has the full color rule:
+// summarized, this is an "as of today" view (not a manual toggle) -
+// day <= 10 of the month gives the current month's own due a grace period
+// (doesn't count), day >= 11 counts it same as any older unpaid month, and
+// 0/1/2+ resulting "months due" maps to green/yellow/red.
+// ─────────────────────────────────────────────────────────────────────────
 
-function formatMoney(amount) {
-  return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
-}
+const BUCKET_STYLES = {
+  green: { tile: '#34a853', text: '#ffffff' },
+  yellow: { tile: '#fbbc04', text: '#3c2f00' },
+  red: { tile: '#ea4335', text: '#ffffff' },
+};
 
-// Kept in sync with the chk_house_status CHECK constraint (Active /
-// Inactive) - same "unrecognized falls back to a neutral gray badge"
-// pattern as every other status badge in this codebase.
-function statusBadgeStyle(status) {
-  if (status === 'Active') return styles.badgeActive;
-  if (status === 'Inactive') return styles.badgeInactive;
-  return styles.badgeUnknown;
-}
+const MIN_TILE_WIDTH = 58;
+const TILE_HEIGHT = 42;
+const TILE_GAP = 6;
 
-function statusTextStyle(status) {
-  if (status === 'Active') return styles.badgeTextActive;
-  if (status === 'Inactive') return styles.badgeTextInactive;
-  return styles.badgeTextUnknown;
-}
-
-// Search-first, not list-everything: GET /me used to embed every house in
-// the society here, but a real society can have well over a hundred, and
-// scrolling through all of them stops being usable long before that (see
-// Society_App_Progress_Log.md). This screen shows nothing until the
-// Admin/Committee member actually types something, then calls the
-// dedicated GET /houses/search?q=... endpoint (matches house_number OR
-// owner_name, capped server-side at MAX_SEARCH_RESULTS) with a short
-// debounce so a request does not fire on every single keystroke. Tapping a
-// result hands the whole search-result house object up to onSelectHouse,
-// which App.js uses to open that house's own dashboard (HouseDashboardScreen).
-export default function HousesScreen({ onBack, onSelectHouse }) {
+export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
   const { accessToken } = useAuth();
+  const { width } = useWindowDimensions();
   const [query, setQuery] = useState('');
   const [houses, setHouses] = useState([]);
-  const [searching, setSearching] = useState(false);
+  const [asOfDate, setAsOfDate] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  // Guards against an older, slower request's response overwriting a
-  // newer one's results if they resolve out of order - compared against
-  // the exact query that was in flight when each response arrives, not
-  // just "is this the most recently started timer".
-  const latestQueryRef = useRef('');
 
-  const runSearch = useCallback(
-    async (searchTerm) => {
-      const trimmed = searchTerm.trim();
-      latestQueryRef.current = trimmed;
-
-      if (!trimmed) {
-        setHouses([]);
-        setError(null);
-        setSearching(false);
-        return;
-      }
-
-      setSearching(true);
+  const load = useCallback(
+    async ({ isRefresh } = {}) => {
+      if (!societyId) return;
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
       try {
-        const data = await apiGet(`/houses/search?q=${encodeURIComponent(trimmed)}`, accessToken);
-        if (latestQueryRef.current === trimmed) {
-          setHouses(data);
-          setError(null);
-        }
+        setError(null);
+        const data = await apiGet(`/society/${societyId}/houses-dues-grid`, accessToken);
+        setHouses(data.houses || []);
+        setAsOfDate(data.asOfDate || null);
       } catch (err) {
-        if (latestQueryRef.current === trimmed) {
-          setError(err.message);
-        }
+        setError(err.message);
       } finally {
-        if (latestQueryRef.current === trimmed) {
-          setSearching(false);
-        }
+        setLoading(false);
+        setRefreshing(false);
       }
     },
-    [accessToken]
+    [accessToken, societyId]
   );
 
   useEffect(() => {
-    const timer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [query, runSearch]);
+    load();
+  }, [load]);
 
-  const hasTyped = query.trim().length > 0;
+  const filteredHouses = useMemo(() => {
+    const trimmed = query.trim().toLowerCase();
+    if (!trimmed) return houses;
+    return houses.filter(
+      (h) =>
+        h.house_number.toLowerCase().includes(trimmed) ||
+        (h.owner_name || '').toLowerCase().includes(trimmed)
+    );
+  }, [houses, query]);
+
+  // Color + count summary is always over the FULL list, not whatever the
+  // search box currently filters down to - this is a whole-society
+  // at-a-glance total, independent of looking up one specific house.
+  const bucketCounts = useMemo(() => {
+    const counts = { green: 0, yellow: 0, red: 0 };
+    for (const house of houses) {
+      if (counts[house.bucket] !== undefined) counts[house.bucket] += 1;
+    }
+    return counts;
+  }, [houses]);
+
+  // Mimics "auto fit": recompute how many columns fit the current width
+  // (phone portrait, tablet, resizable web window) rather than a
+  // hardcoded column count. Sized small/dense deliberately - the goal is
+  // "most houses visible at a glance, scroll for the rest", not one
+  // screen-height per handful of tiles.
+  const availableWidth = width - 32; // screen padding
+  const numColumns = Math.max(4, Math.floor((availableWidth + TILE_GAP) / (MIN_TILE_WIDTH + TILE_GAP)));
+  const tileWidth = (availableWidth - TILE_GAP * (numColumns - 1)) / numColumns;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load({ isRefresh: true })} />}
+    >
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Houses</Text>
-          <Text style={styles.subtitle}>Search by house number or owner name</Text>
-        </View>
+        <Text style={styles.title}>Houses</Text>
+        {houses.length > 0 ? <Text style={styles.houseCount}>{houses.length} houses</Text> : null}
       </View>
+      {asOfDate ? (
+        <Text style={styles.subtitle}>
+          As of today ({new Date(`${asOfDate}T00:00:00Z`).toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+            timeZone: 'UTC',
+          })})
+        </Text>
+      ) : null}
 
       {onBack ? (
         <TouchableOpacity style={styles.backLink} onPress={onBack}>
@@ -109,73 +134,68 @@ export default function HousesScreen({ onBack, onSelectHouse }) {
         </TouchableOpacity>
       ) : null}
 
-      <TextInput
-        style={styles.searchInput}
-        placeholder="e.g. A-101 or an owner's name"
-        placeholderTextColor="#999"
-        value={query}
-        onChangeText={setQuery}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-
-      {searching ? (
-        <View style={styles.searchingRow}>
+      {loading ? (
+        <View style={styles.loadingRow}>
           <ActivityIndicator size="small" />
-          <Text style={styles.searchingText}>Searching...</Text>
+          <Text style={styles.loadingText}>Loading houses...</Text>
         </View>
       ) : null}
 
       {error ? (
         <View style={styles.errorBox}>
           <Text style={styles.error}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={() => runSearch(query)}>
+          <TouchableOpacity style={styles.retryButton} onPress={() => load()}>
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>
       ) : null}
 
-      {!hasTyped && !error ? <Text style={styles.hint}>Type a house number or owner's name to search.</Text> : null}
-
-      {hasTyped && !searching && !error && houses.length === 0 ? (
-        <Text style={styles.hint}>No houses match "{query.trim()}".</Text>
-      ) : null}
-
-      {houses.map((house) => (
-        <TouchableOpacity
-          key={house.id}
-          style={styles.card}
-          activeOpacity={onSelectHouse ? 0.7 : 1}
-          disabled={!onSelectHouse}
-          onPress={() => onSelectHouse?.(house)}
-        >
-          <View style={styles.cardHeader}>
-            <Text style={styles.houseNumber}>{house.house_number}</Text>
-            <View style={[styles.badge, statusBadgeStyle(house.status)]}>
-              <Text style={[styles.badgeText, statusTextStyle(house.status)]}>{house.status}</Text>
-            </View>
+      {!loading && !error ? (
+        <>
+          <View style={styles.summaryRow}>
+            {['green', 'yellow', 'red'].map((bucket) => (
+              <View key={bucket} style={styles.summaryPill}>
+                <View style={[styles.summarySwatch, { backgroundColor: BUCKET_STYLES[bucket].tile }]} />
+                <Text style={styles.summaryCount}>{bucketCounts[bucket]}</Text>
+              </View>
+            ))}
           </View>
 
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Type</Text>
-            <Text style={styles.detailValue}>{house.type}</Text>
-          </View>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Owner</Text>
-            <Text style={styles.detailValue}>{house.owner_name || '—'}</Text>
-          </View>
-          <View style={[styles.detailRow, styles.detailRowLast]}>
-            <Text style={styles.detailLabel}>Monthly rate</Text>
-            <Text style={styles.detailValue}>
-              {house.default_monthly_amount != null ? formatMoney(house.default_monthly_amount) : 'Not set'}
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Filter by house number or owner's name"
+            placeholderTextColor="#999"
+            value={query}
+            onChangeText={setQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+
+          {filteredHouses.length === 0 ? (
+            <Text style={styles.hint}>
+              {houses.length === 0 ? 'No houses found.' : `No houses match "${query.trim()}".`}
             </Text>
-          </View>
-          {onSelectHouse ? <Text style={styles.viewDashboardHint}>Tap to view dashboard →</Text> : null}
-        </TouchableOpacity>
-      ))}
+          ) : null}
 
-      {houses.length === MAX_SEARCH_RESULTS ? (
-        <Text style={styles.hint}>Showing the first {MAX_SEARCH_RESULTS} matches - refine your search for a more specific result.</Text>
+          <View style={[styles.grid, { gap: TILE_GAP }]}>
+            {filteredHouses.map((house) => {
+              const bucketStyle = BUCKET_STYLES[house.bucket] || BUCKET_STYLES.green;
+              return (
+                <TouchableOpacity
+                  key={house.id}
+                  style={[styles.tile, { width: tileWidth, height: TILE_HEIGHT, backgroundColor: bucketStyle.tile }]}
+                  activeOpacity={onSelectHouse ? 0.7 : 1}
+                  disabled={!onSelectHouse}
+                  onPress={() => onSelectHouse?.(house)}
+                >
+                  <Text style={[styles.tileText, { color: bucketStyle.text }]} numberOfLines={1}>
+                    {house.house_number}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </>
       ) : null}
     </ScrollView>
   );
@@ -189,21 +209,28 @@ const styles = StyleSheet.create({
   content: {
     padding: 16,
     paddingTop: 48,
+    paddingBottom: 48,
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 8,
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
   },
   title: {
     fontSize: 22,
     fontWeight: '700',
     color: '#1c1c1e',
   },
+  houseCount: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6e6e73',
+  },
   subtitle: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#6e6e73',
     marginTop: 4,
+    marginBottom: 14,
   },
   backLink: {
     marginBottom: 16,
@@ -213,30 +240,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  searchInput: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    marginBottom: 12,
-  },
-  searchingRow: {
+  loadingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     marginBottom: 12,
   },
-  searchingText: {
+  loadingText: {
     fontSize: 13,
     color: '#6e6e73',
-  },
-  hint: {
-    fontSize: 13,
-    color: '#6e6e73',
-    marginBottom: 16,
   },
   errorBox: {
     marginBottom: 16,
@@ -257,78 +269,66 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
   },
-  card: {
+  summaryRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14,
+  },
+  summaryPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
     backgroundColor: '#fff',
     borderRadius: 10,
-    padding: 16,
-    marginBottom: 12,
+    paddingVertical: 10,
     shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
   },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
+  summarySwatch: {
+    width: 16,
+    height: 16,
+    borderRadius: 4,
   },
-  houseNumber: {
+  summaryCount: {
     fontSize: 18,
     fontWeight: '700',
     color: '#1c1c1e',
   },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+  searchInput: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: 14,
+    marginBottom: 14,
   },
-  detailRowLast: {
-    borderBottomWidth: 0,
-  },
-  detailLabel: {
+  hint: {
     fontSize: 13,
     color: '#6e6e73',
+    marginBottom: 16,
   },
-  detailValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#1c1c1e',
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
   },
-  viewDashboardHint: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1a73e8',
-    marginTop: 10,
-    textAlign: 'right',
+  tile: {
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
   },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeText: {
-    fontSize: 11,
+  tileText: {
+    fontSize: 10.5,
     fontWeight: '700',
-  },
-  badgeActive: {
-    backgroundColor: '#e6f4ea',
-  },
-  badgeTextActive: {
-    color: '#2e7d32',
-  },
-  badgeInactive: {
-    backgroundColor: '#fdecea',
-  },
-  badgeTextInactive: {
-    color: '#c0392b',
-  },
-  badgeUnknown: {
-    backgroundColor: '#eee',
-  },
-  badgeTextUnknown: {
-    color: '#666',
   },
 });
