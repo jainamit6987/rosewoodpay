@@ -79,7 +79,7 @@ function statusBadgeLabel(transaction) {
 // WaterCharge rows for the history list below, rather than adding a new
 // backend endpoint just to narrow a type filter that already has nowhere
 // else to live but the client.
-export default function WaterChargeScreen({ house, society, onBack }) {
+export default function WaterChargeScreen({ house, society, onBack, onViewReceipt }) {
   const { accessToken } = useAuth();
   const [amount, setAmount] = useState('');
   const [utrNumber, setUtrNumber] = useState('');
@@ -398,6 +398,11 @@ export default function WaterChargeScreen({ house, society, onBack }) {
                 \u2022 {formatDate(txn.txn_date || txn.created_at)}
               </Text>
               {txn.description ? <Text style={styles.historyMeta}>{txn.description}</Text> : null}
+              {onViewReceipt ? (
+                <TouchableOpacity onPress={() => onViewReceipt(txn)} style={styles.viewReceiptLink}>
+                  <Text style={styles.viewReceiptLinkText}>View Receipt &rsaquo;</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           ))
         )}
@@ -610,6 +615,15 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#6e6e73',
     marginTop: 2,
+  },
+  viewReceiptLink: {
+    alignSelf: 'flex-end',
+    marginTop: 6,
+  },
+  viewReceiptLinkText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#1a73e8',
   },
   badge: {
     paddingHorizontal: 8,

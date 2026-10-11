@@ -883,6 +883,122 @@ router.get('/:houseId/billing-periods/:periodId/receipt', authenticate, async (r
   });
 });
 
+// GET /:houseId/transactions/:transactionId/receipt - a receipt for a
+// single WaterCharge transaction, same visual document as the Maintenance
+// billing-period receipt above, but sourced directly from the transaction
+// row instead of via billing_periods/transaction_allocations. WaterCharge
+// is deliberately "pay-as-you-go" with no billing_periods row behind it at
+// all (see 20260803000000_add_water_charge_transaction_type.sql) - each
+// payment IS the whole thing to show a receipt for, one-to-one, unlike a
+// Maintenance payment which can span several periods and gets one receipt
+// per period it covers.
+//
+// Scoped to transaction_type='WaterCharge' specifically, not "any
+// transaction" generically - Maintenance already has its own, more
+// correct, per-period receipt path above (a bulk multi-month Maintenance
+// payment's raw total would be a misleading receipt amount on its own,
+// per the existing one's own comment), so this intentionally does not
+// become a second, inconsistent way to get a Maintenance receipt.
+//
+// No explicit Admin/Committee/assignment check beyond "house is visible
+// and this transaction belongs to it" - same reasoning as GET
+// /:houseId/transactions just above it: the transactions RLS policies
+// ("Residents can view transactions for their assigned flats" / Admin-or-
+// Committee) already decide what a given caller may see, and this
+// response exposes nothing beyond what that same transaction already
+// shows them there (unlike /:houseId/dashboard's own stricter check,
+// which exists specifically to gate another resident's contact details).
+router.get('/:houseId/transactions/:transactionId/receipt', authenticate, async (req, res) => {
+  const { houseId, transactionId } = req.params;
+  const supabase = req.supabase;
+
+  const { data: house, error: houseError } = await supabase
+    .from('houses')
+    .select('id, house_number, owner_name')
+    .eq('id', houseId)
+    .maybeSingle();
+
+  if (houseError) {
+    return res.status(500).json({ error: houseError.message });
+  }
+  if (!house) {
+    return res.status(404).json({ error: 'House not found or not accessible.' });
+  }
+
+  const { data: transaction, error: transactionError } = await supabase
+    .from('transactions')
+    .select(
+      'id, society_id, house_id, transaction_type, payment_mode, utr_number, txn_date, amount, description, processing_status, submitted_by, verified_by, verified_at, rejection_reason, created_at'
+    )
+    .eq('id', transactionId)
+    .eq('house_id', houseId)
+    .maybeSingle();
+
+  if (transactionError) {
+    return res.status(500).json({ error: transactionError.message });
+  }
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transaction not found for this house.' });
+  }
+  if (transaction.transaction_type !== 'WaterCharge') {
+    return res
+      .status(404)
+      .json({ error: 'A receipt for this transaction type is available from its billing period instead.' });
+  }
+
+  const statusLabel =
+    transaction.processing_status === 'Verified'
+      ? 'Approved'
+      : transaction.processing_status === 'Submitted'
+      ? 'Pending Approval'
+      : 'Rejected';
+
+  const { data: society, error: societyError } = await supabase
+    .from('societies')
+    .select('name')
+    .eq('id', transaction.society_id)
+    .maybeSingle();
+
+  if (societyError) {
+    return res.status(500).json({ error: societyError.message });
+  }
+
+  // supabaseAdmin to resolve display names - same reasoning as the
+  // billing-period receipt above.
+  const memberAuthUserIds = [...new Set([transaction.submitted_by, transaction.verified_by].filter(Boolean))];
+  const { data: members, error: membersError } =
+    memberAuthUserIds.length > 0
+      ? await supabaseAdmin
+          .from('society_members')
+          .select('auth_user_id, name, phone_number')
+          .eq('society_id', transaction.society_id)
+          .in('auth_user_id', memberAuthUserIds)
+      : { data: [], error: null };
+
+  if (membersError) {
+    return res.status(500).json({ error: membersError.message });
+  }
+
+  const memberByAuthUserId = new Map((members || []).map((m) => [m.auth_user_id, m]));
+  const submitter = memberByAuthUserId.get(transaction.submitted_by);
+  const verifier = transaction.verified_by ? memberByAuthUserId.get(transaction.verified_by) : null;
+
+  res.json({
+    status: statusLabel,
+    rejectionReason: transaction.processing_status === 'Rejected' ? transaction.rejection_reason || null : null,
+    paymentMode: transaction.payment_mode,
+    refNo: transaction.utr_number || null,
+    residentName: submitter?.name || house.owner_name || 'Resident',
+    residentMobile: submitter?.phone_number || null,
+    houseNumber: house.house_number,
+    societyName: society?.name || '',
+    description: transaction.description || null,
+    amount: transaction.amount,
+    date: transaction.txn_date || transaction.verified_at || transaction.created_at,
+    receivedBy: transaction.processing_status === 'Verified' ? verifier?.name || null : null,
+  });
+});
+
 // Admin-only: directly creates the next `months` sequential billing
 // period(s) for a house, ahead of any payment - the "create billing record
 // for a house (next month or future months for advance payment)" gap from

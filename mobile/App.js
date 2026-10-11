@@ -29,6 +29,7 @@ import TransactionReportScreen from './src/screens/TransactionReportScreen';
 import MonthEndClosingScreen from './src/screens/MonthEndClosingScreen';
 import RecordExpenseScreen from './src/screens/RecordExpenseScreen';
 import WaterChargeScreen from './src/screens/WaterChargeScreen';
+import WaterChargeReceiptScreen from './src/screens/WaterChargeReceiptScreen';
 import ChangePasswordScreen from './src/screens/ChangePasswordScreen';
 import EditProfileScreen from './src/screens/EditProfileScreen';
 
@@ -94,6 +95,14 @@ function AuthenticatedApp() {
   // paymentTarget above), not just a boolean, since the screen builds its
   // own UPI deep link from society.upi_vpa/upi_payee_name.
   const [waterChargeTarget, setWaterChargeTarget] = useState(null);
+  // Drill-down from a single row's "View Receipt" link on WaterChargeScreen's
+  // own history list (see waterChargeTarget above) - a {house, transactionId}
+  // pair, same shape/reasoning as receiptTarget above, but keyed by
+  // transactionId rather than periodId: a WaterCharge payment has no
+  // billing_periods row behind it at all (see
+  // 20260803000000_add_water_charge_transaction_type.sql), so the
+  // transaction IS the thing a receipt is generated for, one-to-one.
+  const [waterChargeReceiptTarget, setWaterChargeReceiptTarget] = useState(null);
   // Plain booleans, not objects, since neither GET /society nor the houses
   // list is ever scoped to one house/target. Both are spokes off
   // AdminHomeScreen now (see
@@ -337,12 +346,27 @@ function AuthenticatedApp() {
     return <MyTransactionsScreen house={myTransactionsTarget} onBack={() => setMyTransactionsTarget(null)} />;
   }
 
+  // Checked before waterChargeTarget below - same "drill-down set on top of
+  // it" shape as receiptTarget/historyTarget above.
+  if (waterChargeReceiptTarget) {
+    return (
+      <WaterChargeReceiptScreen
+        house={waterChargeReceiptTarget.house}
+        transactionId={waterChargeReceiptTarget.transactionId}
+        onBack={() => setWaterChargeReceiptTarget(null)}
+      />
+    );
+  }
+
   if (waterChargeTarget) {
     return (
       <WaterChargeScreen
         house={waterChargeTarget.house}
         society={waterChargeTarget.society}
         onBack={() => setWaterChargeTarget(null)}
+        onViewReceipt={(txn) =>
+          setWaterChargeReceiptTarget({ house: waterChargeTarget.house, transactionId: txn.id })
+        }
       />
     );
   }
