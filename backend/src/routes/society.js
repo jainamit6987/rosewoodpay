@@ -594,24 +594,22 @@ router.get('/:id/pendency-report', authenticate, async (req, res) => {
 });
 
 // "As of today, which color bucket does this house fall into" - the
-// Houses screen's grid color rule, confirmed with the user:
-//   Day <= 10 of the month: the CURRENT month's own due is still within
-//     grace and does NOT count - only months strictly BEFORE the current
-//     month count toward the color.
-//   Day >= 11 of the month: grace is over - the current month's own due
-//     (if unpaid) DOES count, same as any older unpaid month.
-//   Whichever "months due" count results: 0 -> green, 1 -> yellow, 2+ -> red.
-// Computed server-side, once, rather than shipping raw counts for every
-// client screen to reinterpret - same reasoning as GET /me's own
-// hasPendingSubmission. Day-of-month is read in UTC, same as every other
-// date boundary in this file (startOfCurrentMonthUtc) - a society's own
-// `timezone` column is purely informational today (see PATCH /:id above),
-// not wired into any date-boundary logic yet, so this intentionally stays
-// consistent with that rather than introducing a one-off local-time path.
-function duesBucket(overdueMonths, currentMonthDue, dayOfMonth) {
-  const dueMonths = dayOfMonth <= 10 ? overdueMonths : overdueMonths + (currentMonthDue ? 1 : 0);
-  if (dueMonths <= 0) return 'green';
-  if (dueMonths === 1) return 'yellow';
+// Houses screen's grid color rule. Simplified 2026-10-13 (discussed
+// directly with the user) - the color used to exempt the current month's
+// own due from counting until day 11 of the month (a grace period); that
+// branch is gone now, the current month's own due (if unpaid) always
+// counts, same as any older unpaid month:
+//   1 period due  -> green  (normal - typically just this month's own,
+//                            not-yet-overdue due; not alarming on its own)
+//   2 periods due -> yellow
+//   3+ periods due -> red
+// periodsDue is overdueMonths (strictly-before-this-month) plus 1 more if
+// currentMonthDue is also true. Computed server-side, once, rather than
+// shipping raw counts for every client screen to reinterpret - same
+// reasoning as GET /me's own hasPendingSubmission.
+function duesBucket(periodsDue) {
+  if (periodsDue <= 1) return 'green';
+  if (periodsDue === 2) return 'yellow';
   return 'red';
 }
 
@@ -655,10 +653,30 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
 
   const now = new Date();
   const currentMonthDateOnly = toDateOnly(startOfCurrentMonthUtc());
-  const dayOfMonth = now.getUTCDate();
 
   const dueByHouseId = new Map();
+  // Current month's own billing_period status (or its absence entirely,
+  // meaning never billed) - separate from the Open-periods-only query
+  // above, which can never distinguish "already Closed" from "no period
+  // row at all" (both are simply missing from that result). Needed for
+  // the "Paid / Pending" legend count below: the user explicitly decided
+  // (2026-10-13) a house with no period generated yet for this month
+  // should still count as Pending, not Paid - this is the only query that
+  // can tell the two apart.
+  const currentMonthStatusByHouseId = new Map();
+  // Houses with at least one Verified Maintenance transaction landing in
+  // the current calendar month (by verified_at, not the optional
+  // resident-supplied txn_date - same reasoning as the transaction-report
+  // route's own date filter above) - the per-tile tick mark. Deliberately
+  // transaction-based, not period-based: the user wants to track "did a
+  // receipt happen this month", so a house that pre-paid months in
+  // advance (no transaction this month, even though this month's period
+  // is already Closed from that earlier payment) correctly gets no tick.
+  const paidThisMonthHouseIds = new Set();
+
   if ((houses || []).length > 0) {
+    const houseIds = houses.map((h) => h.id);
+
     const { data: openPeriods, error: periodsError } = await supabase
       .from('billing_periods')
       .select('house_id, period_month')
@@ -681,10 +699,55 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
         entry.currentMonthDue = true;
       }
     }
+
+    const { data: currentMonthPeriods, error: currentMonthPeriodsError } = await supabase
+      .from('billing_periods')
+      .select('house_id, status')
+      .eq('society_id', societyId)
+      .eq('period_month', currentMonthDateOnly);
+
+    if (currentMonthPeriodsError) {
+      return res.status(500).json({ error: currentMonthPeriodsError.message });
+    }
+
+    for (const period of currentMonthPeriods || []) {
+      currentMonthStatusByHouseId.set(period.house_id, period.status);
+    }
+
+    const nextMonthDateOnly = toDateOnly(addMonths(currentMonthDateOnly, 1));
+    const { data: verifiedThisMonth, error: verifiedThisMonthError } = await supabase
+      .from('transactions')
+      .select('house_id')
+      .eq('transaction_type', 'Maintenance')
+      .eq('processing_status', 'Verified')
+      .in('house_id', houseIds)
+      .gte('verified_at', `${currentMonthDateOnly}T00:00:00Z`)
+      .lt('verified_at', `${nextMonthDateOnly}T00:00:00Z`);
+
+    if (verifiedThisMonthError) {
+      return res.status(500).json({ error: verifiedThisMonthError.message });
+    }
+
+    for (const txn of verifiedThisMonth || []) {
+      paidThisMonthHouseIds.add(txn.house_id);
+    }
   }
+
+  let currentMonthPaidCount = 0;
+  let currentMonthPendingCount = 0;
 
   const result = (houses || []).map((house) => {
     const due = dueByHouseId.get(house.id) || { overdueMonths: 0, currentMonthDue: false };
+    const periodsDue = due.overdueMonths + (due.currentMonthDue ? 1 : 0);
+    // "Paid" for the legend means this month's own period is actually
+    // settled (Closed or Waived) - Open, or no period row at all (never
+    // billed), both count as Pending, per the user's explicit 2-bucket
+    // decision above.
+    const currentMonthStatus = currentMonthStatusByHouseId.get(house.id) || null;
+    const currentMonthSettled = currentMonthStatus === 'Closed' || currentMonthStatus === 'Waived';
+    if (currentMonthSettled) currentMonthPaidCount += 1;
+    else currentMonthPendingCount += 1;
+
     return {
       id: house.id,
       house_number: house.house_number,
@@ -692,11 +755,19 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
       status: house.status,
       overdueMonths: due.overdueMonths,
       currentMonthDue: due.currentMonthDue,
-      bucket: duesBucket(due.overdueMonths, due.currentMonthDue, dayOfMonth),
+      bucket: duesBucket(periodsDue),
+      currentMonthSettled,
+      paidThisMonth: paidThisMonthHouseIds.has(house.id),
     };
   });
 
-  res.json({ asOfDate: toDateOnly(now), houses: result });
+  res.json({
+    asOfDate: toDateOnly(now),
+    currentMonth: currentMonthDateOnly,
+    currentMonthPaidCount,
+    currentMonthPendingCount,
+    houses: result,
+  });
 });
 
 // Plain English month name lookup for the description this endpoint
