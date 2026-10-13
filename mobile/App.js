@@ -308,8 +308,32 @@ function AuthenticatedApp() {
     );
   }
 
+  // Checked before houseTransactionsTarget below - a drill-down set on top
+  // of it (a "View Receipt" tap on a WaterCharge row there), same shape as
+  // receiptTarget/historyTarget above. This single check also covers the
+  // waterChargeTarget drill-down further below, since it must run before
+  // BOTH of its possible parent screens - whichever happens to still be
+  // set underneath stays untouched, exactly like every other "clearing
+  // this one piece of state falls back to whichever screen is still set"
+  // drill-down in this file.
+  if (waterChargeReceiptTarget) {
+    return (
+      <WaterChargeReceiptScreen
+        house={waterChargeReceiptTarget.house}
+        transactionId={waterChargeReceiptTarget.transactionId}
+        onBack={() => setWaterChargeReceiptTarget(null)}
+      />
+    );
+  }
+
   if (houseTransactionsTarget) {
-    return <HouseTransactionsScreen house={houseTransactionsTarget} onBack={() => setHouseTransactionsTarget(null)} />;
+    return (
+      <HouseTransactionsScreen
+        house={houseTransactionsTarget}
+        onBack={() => setHouseTransactionsTarget(null)}
+        onViewReceipt={(txn) => setWaterChargeReceiptTarget({ house: houseTransactionsTarget, transactionId: txn.id })}
+      />
+    );
   }
 
   // Checked before houseDashboardTarget/showMembers below - a resident
@@ -344,18 +368,6 @@ function AuthenticatedApp() {
 
   if (myTransactionsTarget) {
     return <MyTransactionsScreen house={myTransactionsTarget} onBack={() => setMyTransactionsTarget(null)} />;
-  }
-
-  // Checked before waterChargeTarget below - same "drill-down set on top of
-  // it" shape as receiptTarget/historyTarget above.
-  if (waterChargeReceiptTarget) {
-    return (
-      <WaterChargeReceiptScreen
-        house={waterChargeReceiptTarget.house}
-        transactionId={waterChargeReceiptTarget.transactionId}
-        onBack={() => setWaterChargeReceiptTarget(null)}
-      />
-    );
   }
 
   if (waterChargeTarget) {

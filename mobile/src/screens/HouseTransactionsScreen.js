@@ -74,7 +74,20 @@ function statusTextStyle(status) {
 // The UTR/Cash reference and which month(s) a payment covers don't fit in
 // a single compact row, so tapping a row expands it in place to reveal
 // them instead of dropping that detail.
-export default function HouseTransactionsScreen({ house, onBack }) {
+//
+// A "View Receipt" link is shown in that expanded detail box for
+// WaterCharge rows only (via onViewReceipt, if provided) - this was the
+// one Admin-facing screen that listed WaterCharge payments but had no way
+// to open a receipt for one at all (Admin's other receipt path, the
+// "Receipts" tile/BillingHistoryScreen, is built around billing_periods,
+// which WaterCharge never has - see WaterChargeReceiptScreen's own
+// comment). Maintenance rows deliberately do NOT get one here - a single
+// Maintenance transaction can span several billing periods (FIFO/advance
+// payments), each with its own already-correct receipt reachable from
+// BillingHistoryScreen instead; a transaction-level receipt link here
+// would have to arbitrarily pick one of those periods, which is exactly
+// the ambiguity that screen's own per-period design avoids.
+export default function HouseTransactionsScreen({ house, onBack, onViewReceipt }) {
   const { accessToken } = useAuth();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -172,6 +185,11 @@ export default function HouseTransactionsScreen({ house, onBack }) {
                   <View style={styles.detailBox}>
                     <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
                     <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                    {transaction.transaction_type === 'WaterCharge' && onViewReceipt ? (
+                      <TouchableOpacity onPress={() => onViewReceipt(transaction)} style={styles.viewReceiptLink}>
+                        <Text style={styles.viewReceiptLinkText}>View Receipt &rsaquo;</Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
                 ) : null}
               </TouchableOpacity>
@@ -295,6 +313,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6e6e73',
     marginTop: 2,
+  },
+  viewReceiptLink: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+  },
+  viewReceiptLinkText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#1a73e8',
   },
   badge: {
     paddingHorizontal: 8,
