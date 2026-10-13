@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { apiGet } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import TransactionStatusLegend from '../components/TransactionStatusLegend';
+import { getTransactionStatusInfo } from '../utils/transactionStatus';
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -51,29 +53,28 @@ function describeAllocations(transaction) {
   return `Covers: ${months.join(', ')}`;
 }
 
-function statusBadgeStyle(status) {
-  if (status === 'Verified') return styles.badgeVerified;
-  if (status === 'Rejected' || status === 'Failed') return styles.badgeRejected;
-  return styles.badgePending;
-}
-
-function statusTextStyle(status) {
-  if (status === 'Verified') return styles.badgeTextVerified;
-  if (status === 'Rejected' || status === 'Failed') return styles.badgeTextRejected;
-  return styles.badgeTextPending;
-}
-
 // The Admin/Committee-facing "view transactions for a house" screen
 // (workflow S.No 23) - every payment ever submitted against this one
 // house, backed by GET /houses/:houseId/transactions. Reached from a
 // "Transactions" tile on HouseDashboardScreen.
 //
-// Rendered as a table (Date/Type/Amount/Status columns, zebra-striped
-// rows), same layout MyTransactionsScreen uses - no separate House column
-// here since this screen is already scoped to one house (its own title).
-// The UTR/Cash reference and which month(s) a payment covers don't fit in
-// a single compact row, so tapping a row expands it in place to reveal
-// them instead of dropping that detail.
+// Rendered as a table (Date/Type/Amount columns, zebra-striped rows), same
+// layout MyTransactionsScreen uses - no separate House column here since
+// this screen is already scoped to one house (its own title). The
+// UTR/Cash reference and which month(s) a payment covers don't fit in a
+// single compact row, so tapping a row expands it in place to reveal them
+// instead of dropping that detail - a trailing chevron on each row signals
+// that affordance.
+//
+// Status is a colored icon next to the Amount (utils/transactionStatus.js)
+// rather than a text badge, with a frozen TransactionStatusLegend pinned
+// above the scrollable table - same reasoning/discussion as
+// MyTransactionsScreen's own copy of this comment (2026-10-13). This also
+// picks up the Gateway-vs-Admin-review distinction MyTransactionsScreen
+// already had and this screen previously didn't (it used to just show the
+// raw processing_status word, with no PaySharp-specific split) - now both
+// screens share the exact same status logic instead of two near-identical
+// copies of it.
 //
 // A "View Receipt" link is shown in that expanded detail box for
 // WaterCharge rows only (via onViewReceipt, if provided) - this was the
@@ -116,11 +117,9 @@ export default function HouseTransactionsScreen({ house, onBack, onViewReceipt }
   };
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-    >
+    <View style={styles.container}>
+      {/* Fixed (non-scrolling) header + legend - see MyTransactionsScreen's
+          own copy of this comment for why. */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>{house.house_number}</Text>
@@ -133,71 +132,89 @@ export default function HouseTransactionsScreen({ house, onBack, onViewReceipt }
         </TouchableOpacity>
       </View>
 
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" />
+      {!loading && !error && transactions.length > 0 ? (
+        <View style={styles.legendWrap}>
+          <TransactionStatusLegend />
         </View>
-      ) : error ? (
-        <View style={styles.centered}>
-          <Text style={styles.error}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : transactions.length === 0 ? (
-        <Text style={styles.empty}>No payments recorded for this house yet.</Text>
-      ) : (
-        <View style={styles.table}>
-          <View style={styles.tableHeaderRow}>
-            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
-            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
-            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
-            <Text style={[styles.headerCell, styles.colStatus]}>Status</Text>
+      ) : null}
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+      >
+        {loading ? (
+          <View style={styles.centered}>
+            <ActivityIndicator size="large" />
           </View>
-          {transactions.map((transaction, index) => {
-            const isExpanded = expandedId === transaction.id;
-            return (
-              <TouchableOpacity
-                key={transaction.id}
-                activeOpacity={0.7}
-                onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
-                style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
-              >
-                <View style={styles.tableRowLine}>
-                  <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
-                    {formatDate(transaction.created_at)}
-                  </Text>
-                  <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
-                    {transaction.transaction_type}
-                  </Text>
-                  <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
-                    {formatMoney(transaction.amount)}
-                  </Text>
-                  <View style={[styles.colStatus, styles.cellStatusWrap]}>
-                    <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
-                      <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
-                        {transaction.processing_status}
+        ) : error ? (
+          <View style={styles.centered}>
+            <Text style={styles.error}>{error}</Text>
+            <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : transactions.length === 0 ? (
+          <Text style={styles.empty}>No payments recorded for this house yet.</Text>
+        ) : (
+          <View style={styles.table}>
+            <View style={styles.tableHeaderRow}>
+              <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+              <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+              <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
+              <View style={styles.colChevron} />
+            </View>
+            {transactions.map((transaction, index) => {
+              const isExpanded = expandedId === transaction.id;
+              const statusInfo = getTransactionStatusInfo(transaction);
+              return (
+                <TouchableOpacity
+                  key={transaction.id}
+                  activeOpacity={0.7}
+                  onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                  style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
+                >
+                  <View style={styles.tableRowLine}>
+                    <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                      {formatDate(transaction.created_at)}
+                    </Text>
+                    <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                      {transaction.transaction_type}
+                    </Text>
+                    <View style={[styles.colAmount, styles.amountWrap]}>
+                      <Text style={[styles.cellAmount, { color: statusInfo.color }]}>
+                        {formatMoney(transaction.amount)}
+                      </Text>
+                      <Text
+                        style={[styles.statusIcon, { color: statusInfo.color }]}
+                        accessibilityLabel={statusInfo.label}
+                      >
+                        {statusInfo.icon}
                       </Text>
                     </View>
+                    <Text style={styles.chevron}>{isExpanded ? '\u25BE' : '\u203A'}</Text>
                   </View>
-                </View>
-                {isExpanded ? (
-                  <View style={styles.detailBox}>
-                    <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
-                    <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
-                    {transaction.transaction_type === 'WaterCharge' && onViewReceipt ? (
-                      <TouchableOpacity onPress={() => onViewReceipt(transaction)} style={styles.viewReceiptLink}>
-                        <Text style={styles.viewReceiptLinkText}>View Receipt &rsaquo;</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-    </ScrollView>
+                  {isExpanded ? (
+                    <View style={styles.detailBox}>
+                      <Text style={[styles.detailText, styles.detailStatus, { color: statusInfo.color }]}>
+                        {statusInfo.label}
+                      </Text>
+                      <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                      <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                      {transaction.transaction_type === 'WaterCharge' && onViewReceipt ? (
+                        <TouchableOpacity onPress={() => onViewReceipt(transaction)} style={styles.viewReceiptLink}>
+                          <Text style={styles.viewReceiptLinkText}>View Receipt &rsaquo;</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -206,8 +223,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f6f8',
   },
+  scroll: {
+    flex: 1,
+  },
   content: {
     padding: 20,
+    paddingTop: 0,
     paddingBottom: 40,
   },
   centered: {
@@ -220,7 +241,8 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: 20,
+    padding: 20,
+    paddingBottom: 14,
   },
   title: {
     fontSize: 22,
@@ -236,6 +258,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     paddingTop: 4,
+  },
+  legendWrap: {
+    marginHorizontal: 20,
+    marginBottom: 10,
   },
   empty: {
     fontSize: 14,
@@ -284,11 +310,8 @@ const styles = StyleSheet.create({
     color: '#6e6e73',
   },
   cellAmount: {
+    fontSize: 12,
     fontWeight: '700',
-    textAlign: 'right',
-  },
-  cellStatusWrap: {
-    alignItems: 'flex-end',
   },
   colDate: {
     flex: 1.1,
@@ -300,8 +323,25 @@ const styles = StyleSheet.create({
     flex: 1.2,
     textAlign: 'right',
   },
-  colStatus: {
-    flex: 1.1,
+  amountWrap: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 5,
+  },
+  statusIcon: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  colChevron: {
+    width: 16,
+  },
+  chevron: {
+    width: 16,
+    textAlign: 'center',
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#b0b0b5',
   },
   detailBox: {
     backgroundColor: '#f0f4fb',
@@ -314,6 +354,10 @@ const styles = StyleSheet.create({
     color: '#6e6e73',
     marginTop: 2,
   },
+  detailStatus: {
+    fontWeight: '700',
+    marginTop: 0,
+  },
   viewReceiptLink: {
     alignSelf: 'flex-start',
     marginTop: 8,
@@ -321,33 +365,6 @@ const styles = StyleSheet.create({
   viewReceiptLinkText: {
     fontSize: 12.5,
     fontWeight: '600',
-    color: '#1a73e8',
-  },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  badgeVerified: {
-    backgroundColor: '#e6f4ea',
-  },
-  badgeTextVerified: {
-    color: '#2e7d32',
-  },
-  badgeRejected: {
-    backgroundColor: '#fdecea',
-  },
-  badgeTextRejected: {
-    color: '#c0392b',
-  },
-  badgePending: {
-    backgroundColor: '#e8f0fe',
-  },
-  badgeTextPending: {
     color: '#1a73e8',
   },
   error: {

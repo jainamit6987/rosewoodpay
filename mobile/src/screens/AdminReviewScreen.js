@@ -11,6 +11,17 @@ import {
 } from 'react-native';
 import { apiGet, apiPost } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import TransactionStatusLegend from '../components/TransactionStatusLegend';
+import { getTransactionStatusInfo } from '../utils/transactionStatus';
+
+// Every row in this queue is, by definition, still Submitted (see GET
+// /transactions/pending) - but which of the two "pending" states still
+// matters: a PaySharp gateway order (will auto-resolve on its own within
+// ~15 min, see the 2026-10-10 progress log entry) vs a self-reported
+// UTR/Cash/Cheque genuinely waiting on this Admin's own decision. Showing
+// Verified/Rejected in the legend here would be misleading - neither can
+// ever appear in this particular list.
+const PENDING_STATUS_KEYS = ['gatewayPending', 'awaitingReview'];
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -68,13 +79,17 @@ function describeAllocations(transaction) {
 
 // Same table treatment as MyTransactionsScreen/HouseTransactionsScreen -
 // House/Date/Type/Amount as compact table columns, zebra-striped rows,
-// tap-a-row-to-expand for the UTR/Cash reference and covered month(s)
-// (there is no separate Status column here, unlike those two screens -
-// every row in this queue is, by definition, still Submitted, so it would
-// be the same badge repeated on every single row). The Verify/Reject
-// actions stay directly on each row, always visible below it, rather than
-// hidden behind the tap - unlike a pure history list, doing something
-// about each row is this screen's entire purpose.
+// tap-a-row-to-expand for the UTR/Cash reference and covered month(s), with
+// a trailing chevron signaling that affordance. Status - here always one
+// of the two "pending" states, see PENDING_STATUS_KEYS above - is a colored
+// icon next to the Amount, same utils/transactionStatus.js every other
+// transaction-list screen now shares, with its own two-item
+// TransactionStatusLegend pinned above the table (2026-10-13 discussion -
+// see MyTransactionsScreen's own copy of this comment for the full
+// reasoning). The Verify/Reject actions stay directly on each row, always
+// visible below it, rather than hidden behind the tap - unlike a pure
+// history list, doing something about each row is this screen's entire
+// purpose.
 // isAdmin gates Verify/Reject only - Committee members still see this
 // whole queue (same read access GET /transactions/pending already grants
 // them), just without the two action buttons on each row, replaced by a
@@ -171,11 +186,9 @@ export default function AdminReviewScreen({ isAdmin, onBack }) {
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-    >
+    <View style={styles.outer}>
+      {/* Fixed (non-scrolling) header + legend - see
+          MyTransactionsScreen's own copy of this comment for why. */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Review pending payments</Text>
@@ -191,122 +204,152 @@ export default function AdminReviewScreen({ isAdmin, onBack }) {
         </TouchableOpacity>
       ) : null}
 
-      {error && <Text style={styles.error}>{error}</Text>}
-
-      {!error && pending.length === 0 && (
-        <Text style={styles.subtitle}>No pending payments right now - everything is reviewed.</Text>
-      )}
-
-      {pending.length > 0 ? (
-        <View style={styles.table}>
-          <View style={styles.tableHeaderRow}>
-            <Text style={[styles.headerCell, styles.colHouse]}>House</Text>
-            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
-            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
-            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
-          </View>
-          {pending.map((transaction, index) => {
-            const state = rowState[transaction.id] || {};
-            const isRejecting = rejectingId === transaction.id;
-            const isExpanded = expandedId === transaction.id;
-
-            return (
-              <View key={transaction.id} style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}>
-                <TouchableOpacity
-                  activeOpacity={0.7}
-                  onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
-                >
-                  <View style={styles.tableRowLine}>
-                    <Text style={[styles.cellText, styles.colHouse]} numberOfLines={1}>
-                      {transaction.houses?.house_number}
-                    </Text>
-                    <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
-                      {formatDate(transaction.created_at)}
-                    </Text>
-                    <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
-                      {transaction.transaction_type}
-                    </Text>
-                    <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
-                      {formatMoney(transaction.amount)}
-                    </Text>
-                  </View>
-                  {isExpanded ? (
-                    <View style={styles.detailBox}>
-                      <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
-                      <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
-                      {transaction.payment_gateway === 'paysharp' ? (
-                        <Text style={styles.detailText}>
-                          This is a PaySharp instant-UPI order, not a self-reported UTR - PaySharp will confirm it
-                          automatically (Success or Failed/Expired) within 15 minutes, with no review needed here.
-                          Only reject manually if you're confident the resident has abandoned it and don't want to
-                          wait.
-                        </Text>
-                      ) : null}
-                    </View>
-                  ) : null}
-                </TouchableOpacity>
-
-                {state.error && <Text style={styles.rowError}>{state.error}</Text>}
-
-                {!isAdmin ? (
-                  <Text style={styles.viewOnlyNote}>View only - ask an Admin to verify or reject this.</Text>
-                ) : isRejecting ? (
-                  <View style={styles.rejectBox}>
-                    <TextInput
-                      style={styles.reasonInput}
-                      placeholder="Reason for rejecting (required)"
-                      value={rejectReason}
-                      onChangeText={setRejectReason}
-                      multiline
-                    />
-                    <View style={styles.actionRow}>
-                      <TouchableOpacity style={styles.cancelButton} onPress={cancelReject} disabled={state.busy}>
-                        <Text style={styles.cancelButtonText}>Cancel</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.rejectButton}
-                        onPress={() => confirmReject(transaction)}
-                        disabled={state.busy}
-                      >
-                        <Text style={styles.rejectButtonText}>{state.busy ? 'Rejecting…' : 'Confirm reject'}</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  <View style={styles.actionRow}>
-                    <TouchableOpacity
-                      style={styles.rejectOutlineButton}
-                      onPress={() => startReject(transaction)}
-                      disabled={state.busy}
-                    >
-                      <Text style={styles.rejectOutlineButtonText}>Reject</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.verifyButton}
-                      onPress={() => handleVerify(transaction)}
-                      disabled={state.busy}
-                    >
-                      <Text style={styles.verifyButtonText}>{state.busy ? 'Verifying…' : 'Verify'}</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            );
-          })}
+      {!error && pending.length > 0 ? (
+        <View style={styles.legendWrap}>
+          <TransactionStatusLegend statusKeys={PENDING_STATUS_KEYS} />
         </View>
       ) : null}
-    </ScrollView>
+
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={styles.content}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+      >
+        {error && <Text style={styles.error}>{error}</Text>}
+
+        {!error && pending.length === 0 && (
+          <Text style={styles.subtitle}>No pending payments right now - everything is reviewed.</Text>
+        )}
+
+        {pending.length > 0 ? (
+          <View style={styles.table}>
+            <View style={styles.tableHeaderRow}>
+              <Text style={[styles.headerCell, styles.colHouse]}>House</Text>
+              <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+              <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+              <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
+              <View style={styles.colChevron} />
+            </View>
+            {pending.map((transaction, index) => {
+              const state = rowState[transaction.id] || {};
+              const isRejecting = rejectingId === transaction.id;
+              const isExpanded = expandedId === transaction.id;
+              const statusInfo = getTransactionStatusInfo(transaction);
+
+              return (
+                <View key={transaction.id} style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                  >
+                    <View style={styles.tableRowLine}>
+                      <Text style={[styles.cellText, styles.colHouse]} numberOfLines={1}>
+                        {transaction.houses?.house_number}
+                      </Text>
+                      <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                        {formatDate(transaction.created_at)}
+                      </Text>
+                      <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                        {transaction.transaction_type}
+                      </Text>
+                      <View style={[styles.colAmount, styles.amountWrap]}>
+                        <Text style={[styles.cellAmount, { color: statusInfo.color }]}>
+                          {formatMoney(transaction.amount)}
+                        </Text>
+                        <Text
+                          style={[styles.statusIcon, { color: statusInfo.color }]}
+                          accessibilityLabel={statusInfo.label}
+                        >
+                          {statusInfo.icon}
+                        </Text>
+                      </View>
+                      <Text style={styles.chevron}>{isExpanded ? '\u25BE' : '\u203A'}</Text>
+                    </View>
+                    {isExpanded ? (
+                      <View style={styles.detailBox}>
+                        <Text style={[styles.detailText, styles.detailStatus, { color: statusInfo.color }]}>
+                          {statusInfo.label}
+                        </Text>
+                        <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                        <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                        {transaction.payment_gateway === 'paysharp' ? (
+                          <Text style={styles.detailText}>
+                            This is a PaySharp instant-UPI order, not a self-reported UTR - PaySharp will confirm it
+                            automatically (Success or Failed/Expired) within 15 minutes, with no review needed here.
+                            Only reject manually if you're confident the resident has abandoned it and don't want to
+                            wait.
+                          </Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
+
+                  {state.error && <Text style={styles.rowError}>{state.error}</Text>}
+
+                  {!isAdmin ? (
+                    <Text style={styles.viewOnlyNote}>View only - ask an Admin to verify or reject this.</Text>
+                  ) : isRejecting ? (
+                    <View style={styles.rejectBox}>
+                      <TextInput
+                        style={styles.reasonInput}
+                        placeholder="Reason for rejecting (required)"
+                        value={rejectReason}
+                        onChangeText={setRejectReason}
+                        multiline
+                      />
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity style={styles.cancelButton} onPress={cancelReject} disabled={state.busy}>
+                          <Text style={styles.cancelButtonText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.rejectButton}
+                          onPress={() => confirmReject(transaction)}
+                          disabled={state.busy}
+                        >
+                          <Text style={styles.rejectButtonText}>{state.busy ? 'Rejecting…' : 'Confirm reject'}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.actionRow}>
+                      <TouchableOpacity
+                        style={styles.rejectOutlineButton}
+                        onPress={() => startReject(transaction)}
+                        disabled={state.busy}
+                      >
+                        <Text style={styles.rejectOutlineButtonText}>Reject</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.verifyButton}
+                        onPress={() => handleVerify(transaction)}
+                        disabled={state.busy}
+                      >
+                        <Text style={styles.verifyButtonText}>{state.busy ? 'Verifying…' : 'Verify'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+      </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  outer: {
     flex: 1,
     backgroundColor: '#f5f5f7',
+    paddingTop: 48,
+  },
+  container: {
+    flex: 1,
   },
   content: {
     padding: 16,
-    paddingTop: 48,
+    paddingTop: 0,
   },
   centered: {
     flex: 1,
@@ -317,6 +360,7 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',
+    paddingHorizontal: 16,
     marginBottom: 8,
   },
   title: {
@@ -330,12 +374,17 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   backLink: {
-    marginBottom: 16,
+    marginHorizontal: 16,
+    marginBottom: 12,
   },
   backLinkText: {
     color: '#1a73e8',
     fontSize: 14,
     fontWeight: '600',
+  },
+  legendWrap: {
+    marginHorizontal: 16,
+    marginBottom: 10,
   },
   error: {
     color: '#c0392b',
@@ -383,8 +432,8 @@ const styles = StyleSheet.create({
     color: '#6e6e73',
   },
   cellAmount: {
+    fontSize: 12,
     fontWeight: '700',
-    textAlign: 'right',
   },
   colHouse: {
     flex: 1,
@@ -400,6 +449,26 @@ const styles = StyleSheet.create({
     flex: 1.2,
     textAlign: 'right',
   },
+  amountWrap: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 5,
+  },
+  statusIcon: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  colChevron: {
+    width: 16,
+  },
+  chevron: {
+    width: 16,
+    textAlign: 'center',
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#b0b0b5',
+  },
   detailBox: {
     backgroundColor: '#f0f4fb',
     borderRadius: 6,
@@ -410,6 +479,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6e6e73',
     marginTop: 2,
+  },
+  detailStatus: {
+    fontWeight: '700',
+    marginTop: 0,
   },
   rowError: {
     color: '#c0392b',

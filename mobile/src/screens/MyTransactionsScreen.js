@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { apiGet } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import TransactionStatusLegend from '../components/TransactionStatusLegend';
+import { getTransactionStatusInfo } from '../utils/transactionStatus';
 
 function formatMoney(amount) {
   return `\u20B9${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
@@ -63,39 +65,6 @@ function describeAllocations(transaction) {
   return `Covers: ${months.join(', ')}`;
 }
 
-// Kept in sync with the chk_processing_status CHECK constraint. Grouped into
-// three visual buckets rather than one color per exact value - a resident
-// cares whether a payment is settled, rejected, or still somewhere in
-// between, not which exact internal processing stage it is sitting in.
-function statusBadgeStyle(status) {
-  if (status === 'Verified') return styles.badgeVerified;
-  if (status === 'Rejected' || status === 'Failed') return styles.badgeRejected;
-  return styles.badgePending;
-}
-
-function statusTextStyle(status) {
-  if (status === 'Verified') return styles.badgeTextVerified;
-  if (status === 'Rejected' || status === 'Failed') return styles.badgeTextRejected;
-  return styles.badgeTextPending;
-}
-
-// A PaySharp gateway order still sitting Submitted means something
-// genuinely different from a self-reported UPI/NEFT/Cheque submission
-// sitting Submitted - the former is waiting on PaySharp's own automated
-// confirmation (always resolves within 10 minutes, even if abandoned - see
-// the 2026-10-10 progress log entry), the latter on a human Admin with no
-// fixed timeline. The plain "Submitted" badge text does not distinguish
-// these at all, which previously read as confusing/misleading for a
-// gateway order - this keeps the badge itself short (table column is
-// narrow) while the full phrase the user asked for shows in the expanded
-// detail box below.
-function statusBadgeLabel(transaction) {
-  if (transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp') {
-    return 'Gateway Pending';
-  }
-  return transaction.processing_status;
-}
-
 // The resident-facing "My Transactions" tile off ResidentHomeScreen -
 // backed by GET /houses/:houseId/transactions (the same endpoint
 // HouseTransactionsScreen's Admin view already uses), scoped to whichever
@@ -110,12 +79,25 @@ function statusBadgeLabel(transaction) {
 // payments on this same house), just no longer what this particular screen
 // calls.
 //
-// Rendered as a table (Date/Type/Amount/Status columns, zebra-striped rows)
-// rather than one tall card per transaction - reading down a column (e.g.
-// every Amount) is far easier once a resident has a long payment history,
-// and more rows fit on screen at once. The UTR/Cash reference and which
+// Rendered as a table (Date/Type/Amount columns, zebra-striped rows) rather
+// than one tall card per transaction - reading down a column (e.g. every
+// Amount) is far easier once a resident has a long payment history, and
+// more rows fit on screen at once. The UTR/Cash reference and which
 // month(s) a payment covers don't fit in a single compact row, so tapping
-// a row expands it in place to reveal them instead of dropping that detail.
+// a row expands it in place to reveal them instead of dropping that detail
+// - a trailing chevron on each row now signals that affordance exists,
+// which nothing on this screen used to hint at before.
+//
+// Status used to be its own badge column; it is now a colored icon shown
+// right next to the Amount instead (see utils/transactionStatus.js), with
+// a frozen TransactionStatusLegend pinned above the scrollable table
+// explaining what each icon means - discussed directly with the user
+// (2026-10-13): a plain color-only Amount would have lost the "gateway
+// auto-resolves" vs "needs a human Admin" distinction and hurt colorblind
+// readability, so each status keeps its own icon SHAPE, not just a color.
+// Pinning the legend (rather than scrolling with row 1) means it's still
+// one glance away no matter how far down a long history the resident has
+// scrolled, without repeating a status word on every single row.
 export default function MyTransactionsScreen({ house, onBack }) {
   const { accessToken } = useAuth();
   const [transactions, setTransactions] = useState([]);
@@ -145,11 +127,12 @@ export default function MyTransactionsScreen({ house, onBack }) {
   };
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-    >
+    <View style={styles.container}>
+      {/* Fixed (non-scrolling) header + legend - only the table below
+          scrolls, so the legend stays one glance away no matter how far
+          down a long history the resident scrolls. Pull-to-refresh moves
+          down to the scrollable ScrollView below instead of this outer
+          View, since that's the region the gesture naturally belongs to. */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>My Transactions</Text>
@@ -162,71 +145,90 @@ export default function MyTransactionsScreen({ house, onBack }) {
         </TouchableOpacity>
       </View>
 
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" />
+      {!loading && !error && transactions.length > 0 ? (
+        <View style={styles.legendWrap}>
+          <TransactionStatusLegend />
         </View>
-      ) : error ? (
-        <View style={styles.centered}>
-          <Text style={styles.error}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : transactions.length === 0 ? (
-        <Text style={styles.empty}>No payments submitted yet.</Text>
-      ) : (
-        <View style={styles.table}>
-          <View style={styles.tableHeaderRow}>
-            <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
-            <Text style={[styles.headerCell, styles.colType]}>Type</Text>
-            <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
-            <Text style={[styles.headerCell, styles.colStatus]}>Status</Text>
+      ) : null}
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+      >
+        {loading ? (
+          <View style={styles.centered}>
+            <ActivityIndicator size="large" />
           </View>
-          {transactions.map((transaction, index) => {
-            const isExpanded = expandedId === transaction.id;
-            return (
-              <TouchableOpacity
-                key={transaction.id}
-                activeOpacity={0.7}
-                onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
-                style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
-              >
-                <View style={styles.tableRowLine}>
-                  <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
-                    {formatDate(transaction.created_at)}
-                  </Text>
-                  <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
-                    {transaction.transaction_type}
-                  </Text>
-                  <Text style={[styles.cellText, styles.colAmount, styles.cellAmount]}>
-                    {formatMoney(transaction.amount)}
-                  </Text>
-                  <View style={[styles.colStatus, styles.cellStatusWrap]}>
-                    <View style={[styles.badge, statusBadgeStyle(transaction.processing_status)]}>
-                      <Text style={[styles.badgeText, statusTextStyle(transaction.processing_status)]}>
-                        {statusBadgeLabel(transaction)}
+        ) : error ? (
+          <View style={styles.centered}>
+            <Text style={styles.error}>{error}</Text>
+            <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : transactions.length === 0 ? (
+          <Text style={styles.empty}>No payments submitted yet.</Text>
+        ) : (
+          <View style={styles.table}>
+            <View style={styles.tableHeaderRow}>
+              <Text style={[styles.headerCell, styles.colDate]}>Date</Text>
+              <Text style={[styles.headerCell, styles.colType]}>Type</Text>
+              <Text style={[styles.headerCell, styles.colAmount]}>Amount</Text>
+              <View style={styles.colChevron} />
+            </View>
+            {transactions.map((transaction, index) => {
+              const isExpanded = expandedId === transaction.id;
+              const statusInfo = getTransactionStatusInfo(transaction);
+              return (
+                <TouchableOpacity
+                  key={transaction.id}
+                  activeOpacity={0.7}
+                  onPress={() => setExpandedId(isExpanded ? null : transaction.id)}
+                  style={[styles.tableRow, index % 2 === 1 && styles.tableRowZebra]}
+                >
+                  <View style={styles.tableRowLine}>
+                    <Text style={[styles.cellText, styles.colDate, styles.cellMuted]}>
+                      {formatDate(transaction.created_at)}
+                    </Text>
+                    <Text style={[styles.cellText, styles.colType]} numberOfLines={1}>
+                      {transaction.transaction_type}
+                    </Text>
+                    <View style={[styles.colAmount, styles.amountWrap]}>
+                      <Text style={[styles.cellAmount, { color: statusInfo.color }]}>
+                        {formatMoney(transaction.amount)}
+                      </Text>
+                      <Text
+                        style={[styles.statusIcon, { color: statusInfo.color }]}
+                        accessibilityLabel={statusInfo.label}
+                      >
+                        {statusInfo.icon}
                       </Text>
                     </View>
+                    <Text style={styles.chevron}>{isExpanded ? '\u25BE' : '\u203A'}</Text>
                   </View>
-                </View>
-                {isExpanded ? (
-                  <View style={styles.detailBox}>
-                    <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
-                    <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
-                    {transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp' ? (
-                      <Text style={styles.detailText}>
-                        Waiting for Payment Gateway Confirmation - PaySharp always confirms within 15 minutes.
+                  {isExpanded ? (
+                    <View style={styles.detailBox}>
+                      <Text style={[styles.detailText, styles.detailStatus, { color: statusInfo.color }]}>
+                        {statusInfo.label}
                       </Text>
-                    ) : null}
-                  </View>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-    </ScrollView>
+                      <Text style={styles.detailText}>{formatPaymentReference(transaction)}</Text>
+                      <Text style={styles.detailText}>{describeAllocations(transaction)}</Text>
+                      {transaction.processing_status === 'Submitted' && transaction.payment_gateway === 'paysharp' ? (
+                        <Text style={styles.detailText}>
+                          This is a PaySharp instant-UPI order - it resolves automatically (Success or
+                          Failed/Expired) within 15 minutes, no action needed from you.
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -235,8 +237,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f6f8',
   },
+  scroll: {
+    flex: 1,
+  },
   content: {
     padding: 20,
+    paddingTop: 0,
     paddingBottom: 40,
   },
   centered: {
@@ -249,7 +255,8 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: 20,
+    padding: 20,
+    paddingBottom: 14,
   },
   title: {
     fontSize: 22,
@@ -265,6 +272,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     paddingTop: 4,
+  },
+  legendWrap: {
+    marginHorizontal: 20,
+    marginBottom: 10,
   },
   empty: {
     fontSize: 14,
@@ -313,11 +324,8 @@ const styles = StyleSheet.create({
     color: '#6e6e73',
   },
   cellAmount: {
+    fontSize: 12,
     fontWeight: '700',
-    textAlign: 'right',
-  },
-  cellStatusWrap: {
-    alignItems: 'flex-end',
   },
   colDate: {
     flex: 1.1,
@@ -329,8 +337,25 @@ const styles = StyleSheet.create({
     flex: 1.2,
     textAlign: 'right',
   },
-  colStatus: {
-    flex: 1.1,
+  amountWrap: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 5,
+  },
+  statusIcon: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  colChevron: {
+    width: 16,
+  },
+  chevron: {
+    width: 16,
+    textAlign: 'center',
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#b0b0b5',
   },
   detailBox: {
     backgroundColor: '#f0f4fb',
@@ -343,32 +368,9 @@ const styles = StyleSheet.create({
     color: '#6e6e73',
     marginTop: 2,
   },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeText: {
-    fontSize: 11,
+  detailStatus: {
     fontWeight: '700',
-  },
-  badgeVerified: {
-    backgroundColor: '#e6f4ea',
-  },
-  badgeTextVerified: {
-    color: '#2e7d32',
-  },
-  badgeRejected: {
-    backgroundColor: '#fdecea',
-  },
-  badgeTextRejected: {
-    color: '#c0392b',
-  },
-  badgePending: {
-    backgroundColor: '#e8f0fe',
-  },
-  badgeTextPending: {
-    color: '#1a73e8',
+    marginTop: 0,
   },
   error: {
     color: '#c0392b',
