@@ -1,0 +1,67 @@
+%%{init: {'flowchart': {'htmlLabels': true, 'curve': 'basis'}, 'themeVariables': {'fontSize': '16px'}}}%%
+flowchart TD
+
+    subgraph S1["① Resident — our mobile app"]
+        A1["Open app"] --> A2{"Which payment?"}
+        A2 -->|"Maintenance"| A3["Select due month(s)\nAmount auto-filled from\nopen billing period(s), editable"]
+        A2 -->|"Water Charge"| A4["Enter free-form amount\n(pay-as-you-go, no fixed schedule)"]
+        A3 --> A5["Tap 'Pay via UPI app'"]
+        A4 --> A5
+        A5 --> A6["App builds a upi://pay deep link\npayee = society's own VPA + name,\namount, note, cu=INR"]
+    end
+
+    subgraph S2["② Resident's own UPI app"]
+        B1["GPay / PhonePe / Paytm / etc.\nopens, pre-filled with amount + payee"]
+        B2["Resident authorizes with UPI PIN"]
+        B3["Confirmation screen shows the UTR\n(bank reference number)"]
+        B1 --> B2 --> B3
+    end
+
+    subgraph S3["Bank rails"]
+        C1[("Resident's bank")] -->|"UPI transfer"| C2[("Society's own bank account\n(via VPA) — funds land here directly")]
+    end
+
+    subgraph S4["③ Resident — back in our app"]
+        D1["Resident manually copies the UTR\nfrom the UPI app's confirmation screen"]
+        D2["Pastes UTR into our app,\ntaps 'Submit payment'"]
+        D1 --> D2
+    end
+
+    subgraph S5["④ Our backend + database"]
+        E1["POST /transactions\namount, payment_mode=UPI, utr_number"]
+        E2{"Transaction type?"}
+        E3["Maintenance:\nFIFO-allocate against the\noldest open billing period(s)"]
+        E4["Water Charge:\nlogged as pay-as-you-go,\nno billing-period allocation"]
+        E5["Transaction row created\nstatus = 'Submitted'"]
+        E1 --> E2
+        E2 -->|"Maintenance"| E3
+        E2 -->|"Water Charge"| E4
+        E3 --> E5
+        E4 --> E5
+    end
+
+    subgraph S6["⑤ Society Admin/Committee — in-app review queue"]
+        F1["Sees payment in\nAdmin Review screen"]
+        F2["Manually cross-checks the UTR\nagainst the society's bank statement"]
+        F3{"UTR matches\na real credit?"}
+        F4["Tap 'Verify'\n→ status = 'Verified'\nresident's dues/balance updated"]
+        F5["Tap 'Reject' + reason\n→ status = 'Rejected'\nresident notified, must resubmit"]
+        F1 --> F2 --> F3
+        F3 -->|"Yes"| F4
+        F3 -->|"No / mismatch"| F5
+    end
+
+    G1["⚠️ Current gap this flow has:\nno automated proof the payment happened —\na resident-typed UTR is trusted until a\nhuman catches a mismatch. Every single\nUPI payment needs manual Admin review."]
+
+    A6 --> B1
+    B3 --> C1
+    C1 --> C2
+    B3 --> D1
+    D2 --> E1
+    E5 --> F1
+    F2 -.-> G1
+
+    classDef gap fill:#fff3cd,stroke:#d4a017,color:#7a5c00,stroke-width:1px;
+    class G1 gap
+    classDef bank fill:#eef6ff,stroke:#1a73e8,color:#0b3d91;
+    class C1,C2 bank

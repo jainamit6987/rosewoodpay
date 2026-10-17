@@ -28,3 +28,10 @@ Thumbs.db
 # locally, not versioned (frequent edits, and .xlsx diffs are unreadable).
 app-workflows.csv
 app-workflows.xlsx
+app-workflows (version 1).xlsb.xlsx
+
+# Real resident PII (names, phone numbers, emails) - never committed,
+# repo visibility unconfirmed. Transfer these between machines manually
+# (USB/cloud drive), not via git.
+RosewoodMasterData.csv
+supabase/seed_rosewood_century_live.sql

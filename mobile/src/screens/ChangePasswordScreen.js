@@ -23,7 +23,16 @@ const MIN_PASSWORD_LENGTH = 6;
 // AdminHomeScreen and ResidentHomeScreen's Settings/More sections - the
 // same account-level action regardless of which mode a bothAvailable
 // member happens to be viewing right now.
-export default function ChangePasswordScreen({ onDone, onCancel }) {
+// `forced` (2026-10-13, requested directly by the user as part of
+// production-rollout prep): RootNavigator in App.js renders this screen
+// with forced=true, no onCancel at all, whenever the signed-in account's
+// own must_change_password flag is still true (set on every account at
+// creation/reset time - see backend/src/routes/members.js) - the resident
+// cannot reach anything else in the app until this succeeds once. Purely
+// a copy/no-cancel-button difference from the normal voluntary flow
+// reachable from Settings; the actual submit logic and
+// AuthContext.changePassword() call are identical either way.
+export default function ChangePasswordScreen({ onDone, onCancel, forced = false }) {
   const { changePassword } = useAuth();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -78,13 +87,17 @@ export default function ChangePasswordScreen({ onDone, onCancel }) {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>Change Password</Text>
-        <Text style={styles.subtitle}>You'll need your current password to confirm it's really you.</Text>
+        <Text style={styles.title}>{forced ? 'Set Your Password' : 'Change Password'}</Text>
+        <Text style={styles.subtitle}>
+          {forced
+            ? "For your account's security, you must set a new password before continuing. Enter the temporary password you were given, then choose a new one only you know."
+            : "You'll need your current password to confirm it's really you."}
+        </Text>
 
-        <Text style={styles.label}>Current Password</Text>
+        <Text style={styles.label}>{forced ? 'Temporary Password' : 'Current Password'}</Text>
         <TextInput
           style={styles.input}
-          placeholder="Current password"
+          placeholder={forced ? 'Temporary password' : 'Current password'}
           secureTextEntry
           value={currentPassword}
           onChangeText={setCurrentPassword}
@@ -118,12 +131,21 @@ export default function ChangePasswordScreen({ onDone, onCancel }) {
           onPress={handleSubmit}
           disabled={submitting}
         >
-          {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Change Password</Text>}
+          {submitting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>{forced ? 'Set Password' : 'Change Password'}</Text>
+          )}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.cancelButton} onPress={onCancel} disabled={submitting}>
-          <Text style={styles.cancelButtonText}>Cancel</Text>
-        </TouchableOpacity>
+        {/* No Cancel button at all when forced - there is nothing to cancel
+            back to; RootNavigator renders only this screen until it
+            succeeds (see App.js). */}
+        {forced ? null : (
+          <TouchableOpacity style={styles.cancelButton} onPress={onCancel} disabled={submitting}>
+            <Text style={styles.cancelButtonText}>Cancel</Text>
+          </TouchableOpacity>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );

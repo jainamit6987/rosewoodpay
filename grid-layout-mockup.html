@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Houses Grid Mockup</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #f5f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1c1c1e;
+  }
+  .phone-frame {
+    max-width: 420px;
+    margin: 24px auto;
+    background: #f5f5f7;
+    border-radius: 24px;
+    padding: 16px;
+    box-shadow: 0 0 0 1px #ddd, 0 10px 30px rgba(0,0,0,0.08);
+  }
+  .title-row { display: flex; align-items: baseline; justify-content: space-between; }
+  .title { font-size: 22px; font-weight: 700; margin: 0; }
+  .house-count { font-size: 13px; color: #6e6e73; font-weight: 600; }
+  .subtitle { font-size: 13px; color: #6e6e73; margin: 4px 0 14px; }
+  .mockup-banner {
+    background: #fff4ce;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    font-size: 11px;
+    color: #5f4b00;
+    font-weight: 600;
+  }
+  /* Color + count summary - replaces a text legend entirely */
+  .summary-row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .summary-pill {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: #fff;
+    border-radius: 10px;
+    padding: 10px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .summary-swatch { width: 16px; height: 16px; border-radius: 4px; }
+  .summary-count { font-size: 18px; font-weight: 700; }
+  .search-input {
+    width: 100%;
+    background: #fff;
+    border-radius: 10px;
+    border: 1px solid #e0e0e0;
+    padding: 11px 14px;
+    font-size: 14px;
+    margin-bottom: 14px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+    gap: 6px;
+  }
+  .tile {
+    border-radius: 8px;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 10.5px;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+    border: 2px solid transparent;
+    transition: transform 0.05s ease;
+    padding: 0 2px;
+  }
+  .tile:active { transform: scale(0.94); }
+  .tile.selected { border-color: #1c1c1e; }
+  .green { background: #34a853; color: #fff; }
+  .yellow { background: #fbbc04; color: #3c2f00; }
+  .red { background: #ea4335; color: #fff; }
+  .detail-panel {
+    margin-top: 18px;
+    background: #fff;
+    border-radius: 10px;
+    padding: 16px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    display: none;
+  }
+  .detail-panel.show { display: block; }
+  .detail-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .detail-panel-title { font-size: 18px; font-weight: 700; margin: 0; }
+  .detail-panel-close { cursor: pointer; color: #6e6e73; font-size: 16px; }
+  .detail-row {
+    display: flex; justify-content: space-between; padding: 8px 0;
+    border-bottom: 1px solid #f0f0f0; font-size: 13px;
+  }
+  .detail-row:last-of-type { border-bottom: none; }
+  .detail-label { color: #6e6e73; }
+  .detail-value { font-weight: 600; text-align: right; max-width: 60%; }
+  .detail-note { font-size: 11px; color: #999; margin-top: 8px; font-style: italic; }
+  .hint { font-size: 13px; color: #6e6e73; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="phone-frame">
+  <div class="title-row">
+    <h1 class="title">Houses</h1>
+    <span class="house-count" id="house-count"></span>
+  </div>
+  <p class="subtitle" id="date-subtitle"></p>
+
+  <div class="mockup-banner">
+    🛠 Mockup preview - sample houses, not live data. Colors are computed from today's real date.
+  </div>
+
+  <div class="summary-row" id="summary"></div>
+
+  <input class="search-input" id="search" placeholder="Filter by house number or owner's name" oninput="render()" />
+
+  <p class="hint" id="no-match" style="display:none;">No houses match your search.</p>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="detail-panel" id="detail-panel">
+    <div class="detail-panel-header">
+      <h2 class="detail-panel-title" id="detail-title"></h2>
+      <span class="detail-panel-close" onclick="closeDetail()">✕</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Owner</span>
+      <span class="detail-value" id="detail-owner"></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Dues status</span>
+      <span class="detail-value" id="detail-status"></span>
+    </div>
+    <p class="detail-note">(Mockup only - tapping a tile will open the real house dashboard once this is wired up.)</p>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────
+// Color logic (as-of-today view, no manual toggle - always uses the
+// real current date):
+//
+//   Day <= 10 of month: the CURRENT month's own due is still within
+//     grace, so it is NOT counted toward the color. Only months
+//     strictly BEFORE the current month count.
+//       0 counted months  -> GREEN
+//       1 counted month   -> YELLOW
+//       2+ counted months -> RED
+//
+//   Day >= 11 of month: grace period is over, so the current month's
+//     own due (if unpaid) DOES count, same as any older unpaid month.
+//     Total unpaid months (current + any older) decides the color
+//     using the same 0 / 1 / 2+ thresholds above.
+// ─────────────────────────────────────────────────────────────────────
+function dueMonthsForColor(overdueMonths, currentMonthDue, today) {
+  const day = today.getDate();
+  if (day <= 10) return overdueMonths;
+  return overdueMonths + (currentMonthDue ? 1 : 0);
+}
+
+function bucketFor(dueMonths) {
+  if (dueMonths <= 0) return 'green';
+  if (dueMonths === 1) return 'yellow';
+  return 'red';
+}
+
+const BUCKET_LABELS = {
+  green: 'All paid',
+  yellow: '1 month due',
+  red: 'More than 1 month due',
+};
+
+const BUILDINGS = ['A', 'B', 'C', 'D', 'E'];
+const FIRST_NAMES = ['Rajesh', 'Priya', 'Amit', 'Neha', 'Vikram', 'Sunita', 'Kiran', 'Deepak', 'Anita', 'Manoj', 'Pooja', 'Sanjay', 'Ritu', 'Arjun', 'Kavita', 'Rohit', 'Meera', 'Ashok', 'Lakshmi', 'Varun', 'Shreya', 'Nikhil', 'Divya', 'Harish', 'Swati'];
+const LAST_NAMES = ['Kumar', 'Singh', 'Shah', 'Patel', 'Rao', 'Joshi', 'Mehta', 'Verma', 'Desai', 'Nair', 'Iyer', 'Gupta', 'Agarwal', 'Reddy', 'Menon', 'Malhotra', 'Pillai', 'Bhat', 'Rao', 'Kapoor', 'Das', 'Bose', 'Chawla', 'Pillai', 'Jain'];
+
+// Deterministic (not random) so the mix of colors is stable across
+// reloads for review purposes - distribution is roughly 60% fully paid,
+// 20% current-month-only, 10% one month overdue, 10% 2-3 months overdue.
+function generateMockHouses(count) {
+  const houses = [];
+  for (let i = 0; i < count; i++) {
+    const building = BUILDINGS[Math.floor(i / 25)] || 'X';
+    const unitNumber = 101 + (i % 25);
+    const house_number = `${building}-${unitNumber}`;
+    const owner_name = `${FIRST_NAMES[i % FIRST_NAMES.length]} ${LAST_NAMES[(i + 7) % LAST_NAMES.length]}`;
+    const mod = i % 10;
+    let overdueMonths = 0;
+    let currentMonthDue = false;
+    if (mod <= 5) {
+      overdueMonths = 0; currentMonthDue = false;
+    } else if (mod === 6 || mod === 7) {
+      overdueMonths = 0; currentMonthDue = true;
+    } else if (mod === 8) {
+      overdueMonths = 1; currentMonthDue = true;
+    } else {
+      overdueMonths = 2 + (i % 2); currentMonthDue = true;
+    }
+    houses.push({ id: i + 1, house_number, owner_name, overdueMonths, currentMonthDue });
+  }
+  return houses;
+}
+
+const HOUSES = generateMockHouses(125);
+const TODAY = new Date();
+let selectedId = null;
+
+document.getElementById('house-count').textContent = `${HOUSES.length} houses`;
+document.getElementById('date-subtitle').textContent =
+  `As of today (${TODAY.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}) - day ${TODAY.getDate()} of the month`;
+
+function closeDetail() {
+  selectedId = null;
+  render();
+}
+
+function selectTile(id) {
+  selectedId = id;
+  render();
+}
+
+function render() {
+  // Color + count summary (always over the FULL list, not the filtered
+  // search results below - this is a whole-society at-a-glance total).
+  const counts = { green: 0, yellow: 0, red: 0 };
+  HOUSES.forEach((h) => {
+    const b = bucketFor(dueMonthsForColor(h.overdueMonths, h.currentMonthDue, TODAY));
+    counts[b] += 1;
+  });
+  const summaryEl = document.getElementById('summary');
+  summaryEl.innerHTML = '';
+  ['green', 'yellow', 'red'].forEach((b) => {
+    const pill = document.createElement('div');
+    pill.className = 'summary-pill';
+    pill.innerHTML = `<span class="summary-swatch ${b}"></span><span class="summary-count">${counts[b]}</span>`;
+    summaryEl.appendChild(pill);
+  });
+
+  // Grid
+  const query = document.getElementById('search').value.trim().toLowerCase();
+  const filtered = HOUSES.filter(
+    (h) => h.house_number.toLowerCase().includes(query) || h.owner_name.toLowerCase().includes(query)
+  );
+  document.getElementById('no-match').style.display = filtered.length === 0 ? 'block' : 'none';
+
+  const gridEl = document.getElementById('grid');
+  gridEl.innerHTML = '';
+  filtered.forEach((h) => {
+    const b = bucketFor(dueMonthsForColor(h.overdueMonths, h.currentMonthDue, TODAY));
+    const tile = document.createElement('div');
+    tile.className = `tile ${b}` + (selectedId === h.id ? ' selected' : '');
+    tile.textContent = h.house_number;
+    tile.onclick = () => selectTile(h.id);
+    gridEl.appendChild(tile);
+  });
+
+  // Detail panel
+  const selected = HOUSES.find((h) => h.id === selectedId);
+  const panel = document.getElementById('detail-panel');
+  if (selected) {
+    panel.classList.add('show');
+    document.getElementById('detail-title').textContent = selected.house_number;
+    document.getElementById('detail-owner').textContent = selected.owner_name;
+    const dueMonths = dueMonthsForColor(selected.overdueMonths, selected.currentMonthDue, TODAY);
+    const b = bucketFor(dueMonths);
+    document.getElementById('detail-status').textContent =
+      BUCKET_LABELS[b] + (dueMonths > 0 ? ` (${dueMonths} month${dueMonths > 1 ? 's' : ''})` : '');
+  } else {
+    panel.classList.remove('show');
+  }
+}
+
+render();
+</script>
+</body>
+</html>

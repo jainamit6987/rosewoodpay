@@ -21,26 +21,47 @@ function secretsMatch(provided, expected) {
 }
 
 // PaySharp's UPI webhook - registered in their merchant dashboard
-// (Settings -> Configuration) as
-// POST https://<our-public-host>/webhooks/paysharp?secret=<PAYSHARP_WEBHOOK_SECRET>.
+// (Settings -> Configuration -> Webhook), set to trigger for "All Cases"
+// (not Success-only - applyGatewayOutcome below auto-REJECTs on
+// FAILED/EXPIRED too, which would otherwise lose its fast path and fall
+// back entirely to the slower GET /transactions/:id/status polling path).
 // Fires on payment completion with the same shape as GET /order/{orderId}
 // (see services/paysharp.js), plus an `attemptCount`.
+//
+// Auth (2026-10-17, revised): PaySharp's dashboard turned out to support a
+// genuine "Bearer Auth" webhook option after all - this now checks the
+// `Authorization: Bearer <PAYSHARP_WEBHOOK_SECRET>` header as the primary
+// path, closing a real gap the original `?secret=` query-param approach
+// had: Cloud Run's own automatic request logs capture the full request
+// path INCLUDING query strings by default, so that secret used to sit in
+// plaintext in Cloud Logging on every single webhook delivery, visible to
+// anyone with a Logs Viewer+ IAM role. A header is not captured by that
+// same default request logging. The query param is still accepted as a
+// fallback purely so the sandbox webhook (still registered the old way)
+// keeps working untouched - reconfigure sandbox to Bearer Auth too
+// whenever convenient, then this fallback can be deleted.
 //
 // Deliberately NOT behind the `authenticate` middleware - this is a
 // server-to-server call from PaySharp, not a logged-in user's request, and
 // there is no user session/bearer token to check. PaySharp does not sign/
 // HMAC its webhook payloads at all (confirmed in
-// PAYSHARP_UPI_INTENT_INTEGRATION_PLAN.md and their own docs), so the
-// `?secret=` query param is the ONLY thing stopping a stranger from
-// POSTing a fake "payment succeeded" event here - treat it as seriously as
-// an API key.
+// PAYSHARP_UPI_INTENT_INTEGRATION_PLAN.md and their own docs), so this
+// secret is the ONLY thing stopping a stranger from POSTing a fake
+// "payment succeeded" event here - treat it as seriously as an API key.
+function extractBearerToken(authorizationHeader) {
+  const header = authorizationHeader || '';
+  const [scheme, token] = header.split(' ');
+  return scheme === 'Bearer' && token ? token : null;
+}
+
 router.post('/', async (req, res) => {
   if (!env.paysharpWebhookSecret) {
     // Not configured yet - reject outright rather than silently accepting
     // unauthenticated webhook calls with nothing to check them against.
     return res.status(503).json({ error: 'PAYSHARP_WEBHOOK_SECRET is not configured on this backend.' });
   }
-  if (!secretsMatch(req.query.secret, env.paysharpWebhookSecret)) {
+  const providedSecret = extractBearerToken(req.headers.authorization) || req.query.secret;
+  if (!secretsMatch(providedSecret, env.paysharpWebhookSecret)) {
     return res.status(401).json({ error: 'Invalid or missing webhook secret.' });
   }
 

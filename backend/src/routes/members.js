@@ -344,6 +344,18 @@ router.post('/', authenticate, async (req, res) => {
     email: normalizedEmail,
     password: finalPassword,
     email_confirm: true,
+    // Forces LoginScreen -> App.js's RootNavigator into ChangePasswordScreen
+    // (forced mode) on this account's very first sign-in, regardless of
+    // whether finalPassword above was Admin-supplied or auto-generated -
+    // either way it's a password someone other than the member themselves
+    // chose, handed over directly with no SMTP/email verification step in
+    // between (2026-09-13 security audit's concern about enumeration was
+    // about the error message, not this; this is the separate, new
+    // 2026-10-13 "stop everyone sharing one static password forever" gap,
+    // requested directly by the user during production-rollout prep).
+    // Cleared automatically the moment that forced change succeeds - see
+    // AuthContext.changePassword()'s own matching updateUser() call.
+    user_metadata: { must_change_password: true },
   });
 
   if (createError) {
@@ -681,8 +693,15 @@ router.post('/:id/reset-password', authenticate, async (req, res) => {
   }
 
   const newPassword = generateTemporaryPassword();
+  // Same must_change_password gate as POST /members' own createUser() call
+  // above, re-armed here too: a password reset hands the member a brand
+  // new temp password exactly like account creation did, so the same
+  // "forced to pick their own before doing anything else" rule applies -
+  // otherwise a resident could end up back on a permanently-shared/
+  // Admin-known password after every reset, defeating the whole point.
   const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(member.auth_user_id, {
     password: newPassword,
+    user_metadata: { must_change_password: true },
   });
   if (updateError) {
     return res.status(500).json({ error: updateError.message });

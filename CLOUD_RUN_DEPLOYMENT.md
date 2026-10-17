@@ -110,14 +110,23 @@ same PWA, just no longer tied to your laptop.
 
 ## 5. Point PaySharp's webhook at the new URL
 
-In the PaySharp sandbox dashboard, update the webhook URL to:
+In the PaySharp dashboard's Webhook Configuration page (2026-10-17: this
+turned out to offer a real "Bearer Auth" option, not just a bare query
+param - use it, since Cloud Run's own request logs capture full query
+strings by default but not headers):
 
-```
-https://society-app-xxxxxxxxxx-el.a.run.app/webhooks/paysharp?secret=<your PAYSHARP_WEBHOOK_SECRET value>
-```
+- Webhook URL: `https://society-app-xxxxxxxxxx-el.a.run.app/webhooks/paysharp`
+  (no `?secret=...` suffix needed with Bearer Auth)
+- Auth Type: **Bearer Auth**
+- Token: your `PAYSHARP_WEBHOOK_SECRET` value
+- Trigger: **All Cases** (not Success-only - the backend also auto-rejects
+  on FAILED/EXPIRED; Success-only would silently lose that fast path)
 
-(same `secret` value you set as `PAYSHARP_WEBHOOK_SECRET` above). This
-replaces the ngrok URL - no more re-registering a new URL every session.
+(`routes/paysharpWebhook.js` still accepts the old `?secret=...` query
+param too, purely so an already-registered sandbox webhook using that form
+keeps working untouched - switch sandbox over to Bearer Auth the same way
+whenever convenient.) This replaces the ngrok URL - no more re-registering
+a new URL every session.
 
 ## 6. Redeploying after future code changes
 

@@ -597,7 +597,27 @@ function AuthenticatedApp() {
 }
 
 function RootNavigator() {
-  const { isCheckingSession, isSignedIn } = useAuth();
+  const { isCheckingSession, isSignedIn, mustChangePassword } = useAuth();
+  // Tracks "the forced change flow for THIS sign-in has already been
+  // completed" separately from mustChangePassword itself (2026-10-13,
+  // requested directly by the user as part of production-rollout prep).
+  // Needed because the moment ChangePasswordScreen's own
+  // AuthContext.changePassword() call succeeds, Supabase's
+  // onAuthStateChange fires and flips mustChangePassword to false on
+  // this very render pass - without this flag, that would immediately
+  // swap away from ChangePasswordScreen (which is still showing its own
+  // "Password changed, tap Done" confirmation) straight to
+  // AuthenticatedApp, so the resident would never see that confirmation.
+  // Reset back to false on sign-out (the effect below) so a different
+  // account signing in afterward - or the same account forced into this
+  // again later via an Admin's own /reset-password - correctly sees the
+  // gate again rather than inheriting a stale "already done" from a
+  // previous session.
+  const [forcedChangeDone, setForcedChangeDone] = useState(false);
+
+  useEffect(() => {
+    if (!isSignedIn) setForcedChangeDone(false);
+  }, [isSignedIn]);
 
   if (isCheckingSession) {
     return (
@@ -607,7 +627,15 @@ function RootNavigator() {
     );
   }
 
-  return isSignedIn ? <AuthenticatedApp /> : <LoginScreen />;
+  if (!isSignedIn) {
+    return <LoginScreen />;
+  }
+
+  if (mustChangePassword && !forcedChangeDone) {
+    return <ChangePasswordScreen forced onDone={() => setForcedChangeDone(true)} />;
+  }
+
+  return <AuthenticatedApp />;
 }
 
 export default function App() {

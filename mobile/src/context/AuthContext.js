@@ -92,7 +92,23 @@ export function AuthProvider({ children }) {
         return { success: false, error: 'Current password is incorrect.' };
       }
 
-      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      // Also clears must_change_password (2026-10-13, requested directly by
+      // the user as part of production-rollout prep: accounts created with
+      // an Admin-handed-out temp/shared password must be forced through
+      // this exact screen once before reaching anything else - see
+      // mustChangePassword below and RootNavigator in App.js, which is what
+      // actually enforces that gate). Passing `data` alongside `password`
+      // in one updateUser() call is atomic - there is no intermediate
+      // state where the password changed but the flag didn't, or vice
+      // versa. Safe to always clear this, even for a fully voluntary,
+      // not-forced change (ChangePasswordScreen's `forced` prop is only
+      // about UI copy/no-cancel-button - this flag-clearing behavior is
+      // identical either way, since a voluntary change happens from a
+      // member who, by definition, already has a password worth keeping).
+      const { error: updateError } = await supabase.auth.updateUser({
+        password: newPassword,
+        data: { must_change_password: false },
+      });
       if (updateError) {
         return { success: false, error: updateError.message };
       }
@@ -101,6 +117,16 @@ export function AuthProvider({ children }) {
     },
     [session]
   );
+
+  // True only when the signed-in account's own metadata explicitly says
+  // so - never defaults a missing/undefined value to true, so every
+  // pre-existing account (created before this flag existed) is correctly
+  // unaffected. Read fresh from `session` on every render rather than
+  // cached anywhere else, so the moment changePassword() above succeeds
+  // and onAuthStateChange delivers the updated user, this flips to false
+  // and RootNavigator's gate (see App.js) naturally falls away - no
+  // extra plumbing needed.
+  const mustChangePassword = session?.user?.user_metadata?.must_change_password === true;
 
   const lastActivityRef = useRef(Date.now());
   // Counter, not a plain boolean, so it composes safely if more than one
@@ -210,13 +236,24 @@ export function AuthProvider({ children }) {
       isSignedIn: Boolean(session),
       authError,
       logoutReason,
+      mustChangePassword,
       login,
       logout,
       changePassword,
       pauseAutoLogout,
       resumeAutoLogout,
     }),
-    [session, authError, logoutReason, login, logout, changePassword, pauseAutoLogout, resumeAutoLogout]
+    [
+      session,
+      authError,
+      logoutReason,
+      mustChangePassword,
+      login,
+      logout,
+      changePassword,
+      pauseAutoLogout,
+      resumeAutoLogout,
+    ]
   );
 
   return (
