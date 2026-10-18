@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
@@ -10,6 +11,12 @@ import {
   View,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
+
+// Same source file the PWA/native app icons are generated from (see
+// scripts/generate-pwa-icons.js) - keeps the login screen's own logo in
+// sync with the app icon by construction, rather than a second copy that
+// could drift out of sync on a future logo change.
+const LOGO = require('../../assets/CustomAppLogo.jpeg');
 
 export default function LoginScreen() {
   const { login, authError, logoutReason } = useAuth();
@@ -30,7 +37,8 @@ export default function LoginScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <Text style={styles.title}>Society Maintenance</Text>
+      <Image source={LOGO} style={styles.logo} resizeMode="contain" />
+      <Text style={styles.title}>Rosewood Century</Text>
       <Text style={styles.subtitle}>Sign in to view your dues and submit a payment</Text>
 
       {logoutReason === 'inactivity' ? (
@@ -78,6 +86,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 24,
     backgroundColor: '#fff',
+  },
+  logo: {
+    width: 96,
+    height: 96,
+    alignSelf: 'center',
+    marginBottom: 12,
   },
   title: {
     fontSize: 26,

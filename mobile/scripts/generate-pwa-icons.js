@@ -83,7 +83,15 @@ async function main() {
   await makeIcon(path.join(PUBLIC_DIR, 'apple-touch-icon.png'), 180);
   await makeIcon(path.join(PUBLIC_DIR, 'icon-192.png'), 192);
   await makeIcon(path.join(PUBLIC_DIR, 'icon-512.png'), 512);
-  await makeMaskableIcon(path.join(PUBLIC_DIR, 'maskable-icon-512.png'), 512, 0.8);
+  // scale=0.95 (not the original 0.8): the current source (NewAppLogo.jpeg,
+  // 2026-10-18, replacing CustomAppLogo.jpeg) already keeps its own
+  // circular mark + wordmark inset with generous white margin on its own
+  // (unlike the original edge-to-edge gradient logo this scale was tuned
+  // for) - stacking the old 0.8 shrink on top of that existing margin left
+  // the visible mark tiny inside a mostly-blank circle. 0.95 keeps just
+  // enough margin to survive an aggressive OS mask without shrinking an
+  // already-inset design a second time.
+  await makeMaskableIcon(path.join(PUBLIC_DIR, 'maskable-icon-512.png'), 512, 0.95);
 }
 
 main().catch((err) => {
