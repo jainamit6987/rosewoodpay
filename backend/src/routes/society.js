@@ -613,6 +613,39 @@ function duesBucket(periodsDue) {
   return 'red';
 }
 
+// Postgres/PostgREST's own `.order('house_number')` sorts house_number as
+// plain text - "1" < "10" < "100" < "101" < "11" < "2" ... - wrong for
+// both numbering schemes this society actually uses: plain numeric
+// Rowhouses (1, 2, ... 123, meant to sort by numeric value) and
+// letter-prefixed Flats (G1, G2 ... F1, F2 ... S1 ... T1 ..., where
+// G/F/S/T stand for Ground/First/Second/Terrace floor and must sort in
+// that fixed floor order - not alphabetically, even though G<F<S<T would
+// not happen to match alphabetical order anyway). Parses each
+// house_number into a (floor rank, number) pair and sorts by that
+// instead - a plain number gets floor rank 0 (sorts before every lettered
+// flat), G/F/S/T get 1/2/3/4 in that order.
+const FLOOR_PREFIX_RANK = { '': 0, G: 1, F: 2, S: 3, T: 4 };
+
+function parseHouseNumber(houseNumber) {
+  const match = /^([A-Za-z]*)(\d+)$/.exec(String(houseNumber || '').trim());
+  if (!match) {
+    // Unexpected format (should not occur with this society's real data) -
+    // sorts after every recognized house number rather than crashing or
+    // silently misplacing it among numbers it doesn't actually match.
+    return { floorRank: Number.MAX_SAFE_INTEGER, number: Number.MAX_SAFE_INTEGER };
+  }
+  const [, prefix, digits] = match;
+  const floorRank = FLOOR_PREFIX_RANK[prefix.toUpperCase()];
+  return { floorRank: floorRank === undefined ? Number.MAX_SAFE_INTEGER - 1 : floorRank, number: Number(digits) };
+}
+
+function compareHouseNumbers(a, b) {
+  const pa = parseHouseNumber(a);
+  const pb = parseHouseNumber(b);
+  if (pa.floorRank !== pb.floorRank) return pa.floorRank - pb.floorRank;
+  return pa.number - pb.number;
+}
+
 // GET /society/:id/houses-dues-grid - Admin or Committee (same view-only
 // split as every other report in this file). Powers the Houses screen's
 // color-coded grid. Deliberately NOT the pendency-report above reused
@@ -644,8 +677,10 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
   const { data: houses, error: housesError } = await supabase
     .from('houses')
     .select('id, house_number, owner_name, status')
-    .eq('society_id', societyId)
-    .order('house_number', { ascending: true });
+    .eq('society_id', societyId);
+  // No .order('house_number') here - that would sort as plain text (see
+  // compareHouseNumbers above for why that's wrong for this society's
+  // numbering). Sorted in JS instead, right before the response is built.
 
   if (housesError) {
     return res.status(500).json({ error: housesError.message });
@@ -760,6 +795,8 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
       paidThisMonth: paidThisMonthHouseIds.has(house.id),
     };
   });
+
+  result.sort((a, b) => compareHouseNumbers(a.house_number, b.house_number));
 
   res.json({
     asOfDate: toDateOnly(now),

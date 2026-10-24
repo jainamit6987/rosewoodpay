@@ -59,6 +59,26 @@ function expectedBucket(overdueMonths, currentMonthDue) {
   return 'red';
 }
 
+// Mirrors society.js's own compareHouseNumbers (2026-10-24: plain
+// localeCompare used to be correct-enough for this check, but that's
+// exactly the naive-text-sort bug this endpoint itself was just fixed
+// for - "1" < "10" < "100" < "101" < "11" < "2", and G/F/S/T floors
+// sorting alphabetically rather than Ground/First/Second/Terrace order).
+const FLOOR_PREFIX_RANK = { '': 0, G: 1, F: 2, S: 3, T: 4 };
+function parseHouseNumber(houseNumber) {
+  const match = /^([A-Za-z]*)(\d+)$/.exec(String(houseNumber || '').trim());
+  if (!match) return { floorRank: Number.MAX_SAFE_INTEGER, number: Number.MAX_SAFE_INTEGER };
+  const [, prefix, digits] = match;
+  const floorRank = FLOOR_PREFIX_RANK[prefix.toUpperCase()];
+  return { floorRank: floorRank === undefined ? Number.MAX_SAFE_INTEGER - 1 : floorRank, number: Number(digits) };
+}
+function expectedCompareHouseNumbers(a, b) {
+  const pa = parseHouseNumber(a);
+  const pb = parseHouseNumber(b);
+  if (pa.floorRank !== pb.floorRank) return pa.floorRank - pb.floorRank;
+  return pa.number - pb.number;
+}
+
 function findHouse(houses, houseId) {
   return (houses || []).find((h) => h.id === houseId);
 }
@@ -293,9 +313,9 @@ async function main() {
   );
 
   const houseNumbers = houses.map((h) => h.house_number);
-  const sortedHouseNumbers = [...houseNumbers].sort((a, b) => a.localeCompare(b));
+  const sortedHouseNumbers = [...houseNumbers].sort(expectedCompareHouseNumbers);
   check(
-    'houses are returned sorted by house_number',
+    'houses are returned in natural numeric/floor order (1,2,...,10,...; G<F<S<T), not plain alphabetic',
     JSON.stringify(houseNumbers) === JSON.stringify(sortedHouseNumbers),
     houseNumbers
   );
