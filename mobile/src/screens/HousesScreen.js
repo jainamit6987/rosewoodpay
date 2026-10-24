@@ -31,19 +31,30 @@ import { useAuth } from '../context/AuthContext';
 // if also unpaid, and 1/2/3+ maps to green/yellow/red (simplified
 // 2026-10-13 - no more day-of-month grace period).
 //
-// Two more things layered on top of that color, added the same day
-// (discussed directly with the user) to answer a different question -
-// "for the CURRENT month specifically, who has actually paid" - which the
-// color alone can't answer (a green tile just means "not seriously
-// behind overall", not "already paid this month"):
-//   - A small checkmark badge on a tile means a Verified Maintenance
-//     transaction (not Water Charge) landed in THIS calendar month for
-//     that house (paidThisMonth) - deliberately transaction-based, not
-//     period-based, so a house that pre-paid months ago gets no tick now.
-//   - The "Paid / Pending" counts above the grid are period-based instead
-//     (currentMonthPaidCount/currentMonthPendingCount) - whether this
-//     month's own billing period is actually Closed/Waived, with a
-//     never-billed house counting as Pending, not Paid.
+// Two more things layered on top of that color, answering a different
+// question than the bucket color does - "for the CURRENT month
+// specifically, who has actually paid, and in what sense" (a green tile
+// just means "not seriously behind overall", not "already paid this
+// month"). 2026-10-24: replaced the original simpler version of this
+// (a single checkmark badge + a 2-count Paid/Pending legend) with a
+// 4-way scheme, after the 2-bucket version confused the user in two real
+// cases - an advance-payer counted as "Paid" but got no tick, and a
+// resident who'd just cleared old arrears got a tick but didn't count as
+// "Paid". The backend (GET /society/:id/houses-dues-grid) now computes
+// one `paymentStatus` per house from the same two underlying booleans
+// (currentMonthSettled - is THIS month's own period Closed/Waived;
+// paidThisMonth - did a Verified Maintenance transaction land THIS
+// calendar month) - see its own comment in society.js for the exact 2x2:
+//   - paidCurrent - solid tick. The "clean" case: settled, and that's
+//     because of a payment that actually happened this month.
+//   - paidAdvance - star. Settled, but NOT from anything happening this
+//     month - paid ahead of time in an earlier month.
+//   - paidOld     - hollow tick (outlined in the tile's own bucket
+//     color). A payment happened this month, but it went toward old
+//     arrears - this month's OWN bill is still open.
+//   - unpaid      - no badge at all.
+// The summary row above the grid mirrors this with 4 counts instead of
+// the old 2 (paidCurrentCount/paidOldCount/paidAdvanceCount/unpaidCount).
 // ─────────────────────────────────────────────────────────────────────────
 
 const BUCKET_STYLES = {
@@ -63,8 +74,10 @@ export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
   const [houses, setHouses] = useState([]);
   const [asOfDate, setAsOfDate] = useState(null);
   const [currentMonth, setCurrentMonth] = useState(null);
-  const [currentMonthPaidCount, setCurrentMonthPaidCount] = useState(0);
-  const [currentMonthPendingCount, setCurrentMonthPendingCount] = useState(0);
+  const [paidCurrentCount, setPaidCurrentCount] = useState(0);
+  const [paidOldCount, setPaidOldCount] = useState(0);
+  const [paidAdvanceCount, setPaidAdvanceCount] = useState(0);
+  const [unpaidCount, setUnpaidCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -80,8 +93,10 @@ export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
         setHouses(data.houses || []);
         setAsOfDate(data.asOfDate || null);
         setCurrentMonth(data.currentMonth || null);
-        setCurrentMonthPaidCount(data.currentMonthPaidCount || 0);
-        setCurrentMonthPendingCount(data.currentMonthPendingCount || 0);
+        setPaidCurrentCount(data.paidCurrentCount || 0);
+        setPaidOldCount(data.paidOldCount || 0);
+        setPaidAdvanceCount(data.paidAdvanceCount || 0);
+        setUnpaidCount(data.unpaidCount || 0);
       } catch (err) {
         setError(err.message);
       } finally {
@@ -127,6 +142,19 @@ export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
     return new Date(`${currentMonth}T00:00:00Z`).toLocaleDateString('en-IN', {
       month: 'long',
       year: 'numeric',
+      timeZone: 'UTC',
+    });
+  }, [currentMonth]);
+
+  // Month name only (no year) - used as the "Paid (<Month>)" summary-table
+  // label, which only ever needs to disambiguate which of the 12 months,
+  // not which year (it's always read as "right now, this calendar
+  // month") - the subtitle above already states the full date for anyone
+  // who needs the year too.
+  const currentMonthName = useMemo(() => {
+    if (!currentMonth) return '';
+    return new Date(`${currentMonth}T00:00:00Z`).toLocaleDateString('en-IN', {
+      month: 'long',
       timeZone: 'UTC',
     });
   }, [currentMonth]);
@@ -195,14 +223,32 @@ export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
           </View>
 
           {currentMonthLabel ? (
-            <View style={styles.monthStatusRow}>
-              <Text style={styles.monthStatusLabel}>{currentMonthLabel} - Paid / Pending</Text>
-              <View style={styles.monthStatusCounts}>
-                <Text style={[styles.monthStatusCount, styles.monthStatusPaid]}>Paid {currentMonthPaidCount}</Text>
-                <Text style={styles.monthStatusDot}>·</Text>
-                <Text style={[styles.monthStatusCount, styles.monthStatusPending]}>
-                  Pending {currentMonthPendingCount}
-                </Text>
+            <View style={styles.paymentSummaryBox}>
+              <Text style={styles.paymentSummaryHeading}>{currentMonthLabel} - payment status</Text>
+              <View style={styles.paymentSummaryGrid}>
+                <View style={[styles.paymentSummaryCard, { borderColor: '#1a9850' }]}>
+                  <Text style={[styles.paymentSummaryIcon, { color: '#1a9850' }]}>{'\u2713'}</Text>
+                  <Text style={styles.paymentSummaryCount}>{paidCurrentCount}</Text>
+                  <Text style={styles.paymentSummaryLabel}>
+                    {currentMonthName ? `Paid (${currentMonthName})` : 'Paid'}
+                  </Text>
+                </View>
+                <View style={[styles.paymentSummaryCard, { borderColor: '#e67e22' }]}>
+                  <Text style={[styles.paymentSummaryIcon, styles.paymentSummaryIconHollow, { color: '#e67e22' }]}>
+                    {'\u2713'}
+                  </Text>
+                  <Text style={styles.paymentSummaryCount}>{paidOldCount}</Text>
+                  <Text style={styles.paymentSummaryLabel}>Paid (Old)</Text>
+                </View>
+                <View style={[styles.paymentSummaryCard, { borderColor: '#caa000' }]}>
+                  <Text style={[styles.paymentSummaryIcon, { color: '#caa000' }]}>{'\u2605'}</Text>
+                  <Text style={styles.paymentSummaryCount}>{paidAdvanceCount}</Text>
+                  <Text style={styles.paymentSummaryLabel}>Paid (Advance)</Text>
+                </View>
+                <View style={[styles.paymentSummaryCard, { borderColor: '#c0392b' }]}>
+                  <Text style={[styles.paymentSummaryCount, { color: '#c0392b' }]}>{unpaidCount}</Text>
+                  <Text style={styles.paymentSummaryLabel}>Unpaid</Text>
+                </View>
               </View>
             </View>
           ) : null}
@@ -237,9 +283,22 @@ export default function HousesScreen({ societyId, onBack, onSelectHouse }) {
                   <Text style={[styles.tileText, { color: bucketStyle.text }]} numberOfLines={1}>
                     {house.house_number}
                   </Text>
-                  {house.paidThisMonth ? (
-                    <View style={styles.paidBadge} accessibilityLabel="Maintenance paid this month">
-                      <Text style={styles.paidBadgeText}>{'\u2713'}</Text>
+                  {house.paymentStatus === 'paidCurrent' ? (
+                    <View style={styles.statusBadge} accessibilityLabel="Paid this month, settled">
+                      <Text style={styles.statusBadgeTick}>{'\u2713'}</Text>
+                    </View>
+                  ) : null}
+                  {house.paymentStatus === 'paidAdvance' ? (
+                    <View style={styles.statusBadge} accessibilityLabel="Paid in advance">
+                      <Text style={styles.statusBadgeStar}>{'\u2605'}</Text>
+                    </View>
+                  ) : null}
+                  {house.paymentStatus === 'paidOld' ? (
+                    <View
+                      style={[styles.statusBadge, styles.statusBadgeHollow, { borderColor: bucketStyle.tile }]}
+                      accessibilityLabel="Paid old dues, this month still open"
+                    >
+                      <Text style={[styles.statusBadgeHollowTick, { color: bucketStyle.tile }]}>{'\u2713'}</Text>
                     </View>
                   ) : null}
                 </TouchableOpacity>
@@ -349,45 +408,64 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1c1c1e',
   },
-  monthStatusRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  paymentSummaryBox: {
     backgroundColor: '#fff',
     borderRadius: 10,
     paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     marginBottom: 14,
     shadowColor: '#000',
     shadowOpacity: 0.06,
     shadowRadius: 3,
     shadowOffset: { width: 0, height: 1 },
   },
-  monthStatusLabel: {
+  paymentSummaryHeading: {
     fontSize: 12.5,
     fontWeight: '600',
     color: '#6e6e73',
-    flexShrink: 1,
-    marginRight: 8,
+    marginBottom: 8,
   },
-  monthStatusCounts: {
+  paymentSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  // 4 small bordered cards, 2 per row - border color (not fill) carries
+  // the category's accent color, so the card stays readable with dark
+  // text while still being visually tied to its matching tick/star badge
+  // color on the grid above.
+  paymentSummaryCard: {
+    flexBasis: '47%',
+    flexGrow: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    borderWidth: 1.5,
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
   },
-  monthStatusCount: {
+  paymentSummaryIcon: {
     fontSize: 13,
+    fontWeight: '900',
+    width: 14,
+    textAlign: 'center',
+  },
+  // Lighter weight than the solid tick/star icons above - mirrors the
+  // hollow-tick badge's own "outlined, not filled" look on the grid.
+  paymentSummaryIconHollow: {
+    fontWeight: '500',
+  },
+  paymentSummaryCount: {
+    fontSize: 15,
     fontWeight: '700',
+    color: '#1c1c1e',
   },
-  monthStatusPaid: {
-    color: '#1a9850',
-  },
-  monthStatusPending: {
-    color: '#c0392b',
-  },
-  monthStatusDot: {
-    fontSize: 13,
-    color: '#c7c7cc',
+  paymentSummaryLabel: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#6e6e73',
+    flexShrink: 1,
   },
   searchInput: {
     backgroundColor: '#fff',
@@ -423,11 +501,13 @@ const styles = StyleSheet.create({
     fontSize: 10.5,
     fontWeight: '700',
   },
-  // Small white badge, not a plain colored checkmark directly on the tile
-  // - a green check on an already-green tile (or any other bucket color)
+  // Small white badge, not a plain colored checkmark/star directly on the
+  // tile - a colored glyph on an already-colored tile (green/yellow/red)
   // would be hard to read; white stays legible against all three bucket
-  // colors.
-  paidBadge: {
+  // colors. One shared base style for all 3 badge variants (solid tick,
+  // star, hollow tick) - only the glyph (and, for the hollow variant, a
+  // colored ring) changes between them.
+  statusBadge: {
     position: 'absolute',
     top: -4,
     right: -4,
@@ -442,10 +522,29 @@ const styles = StyleSheet.create({
     shadowRadius: 1.5,
     shadowOffset: { width: 0, height: 1 },
   },
-  paidBadgeText: {
+  statusBadgeTick: {
     fontSize: 9,
     fontWeight: '900',
     color: '#1a9850',
+    lineHeight: 10,
+  },
+  statusBadgeStar: {
+    fontSize: 9,
+    fontWeight: '900',
+    color: '#caa000',
+    lineHeight: 10,
+  },
+  // "Hollow" tick - a colored ring (matching the tile's own bucket color,
+  // set inline per-house) around the white fill, plus a lighter-weight
+  // glyph in that same color, instead of the solid tick's bold fixed
+  // green - visually "outlined", not "filled", to distinguish "paid old
+  // dues, this month still open" from the solid tick's "fully settled".
+  statusBadgeHollow: {
+    borderWidth: 1.5,
+  },
+  statusBadgeHollowTick: {
+    fontSize: 8.5,
+    fontWeight: '600',
     lineHeight: 10,
   },
 });

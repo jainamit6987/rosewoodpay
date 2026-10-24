@@ -10,17 +10,23 @@
 //   periodsDue = overdueMonths + (currentMonthDue ? 1 : 0)
 //   periodsDue <= 1 -> green | === 2 -> yellow | >= 3 -> red.
 //
-// Also covers the two new fields added alongside that simplification:
+// Also covers the fields added alongside that simplification, plus the
+// 2026-10-24 4-way paymentStatus built from them:
 //   currentMonthSettled - is the CURRENT month's own period Closed/Waived
-//     (true) vs Open or never-billed at all (false) - feeds the Houses
-//     screen's "Paid / Pending" legend count (currentMonthPaidCount/
-//     currentMonthPendingCount in the top-level response).
+//     (true) vs Open or never-billed at all (false).
 //   paidThisMonth - the per-tile tick mark - a Verified Maintenance
 //     transaction landed in this calendar month (by verified_at), which
 //     is deliberately a DIFFERENT question from currentMonthSettled (a
 //     house that pre-paid months in advance has currentMonthSettled=true
 //     with paidThisMonth=false this month, since no transaction actually
 //     happened now - confirmed directly with the user).
+//   paymentStatus - one of paidCurrent/paidOld/paidAdvance/unpaid, the
+//     2x2 of the above two booleans (see society.js's own comment on
+//     the route for the exact mapping) - feeds the Houses screen's
+//     tick/star/hollow-tick indicator and 4-category summary table
+//     (paidCurrentCount/paidOldCount/paidAdvanceCount/unpaidCount in the
+//     top-level response, replacing the old currentMonthPaidCount/
+//     currentMonthPendingCount pair).
 //
 // Requires the server running (npm run dev) and the seed fixtures from
 // supabase/seed.sql to already exist in the connected project: A-101 (just
@@ -195,6 +201,53 @@ async function main() {
     );
   }
 
+  // --- Setup: a throwaway house with BOTH a Closed current-month period
+  //     AND a Verified Maintenance transaction landing this calendar
+  //     month - the "clean" case (currentMonthSettled=true AND
+  //     paidThisMonth=true), the 4th corner of the 2x2 that the two
+  //     fixtures above don't individually cover - paymentStatus=paidCurrent. ---
+  const paidCurrentTag = `TESTGRIDCUR${Date.now()}`.slice(0, 20);
+  const { data: paidCurrentHouse, error: paidCurrentHouseError } = await supabaseAdmin
+    .from('houses')
+    .insert({ society_id: SOCIETY_ID, house_number: paidCurrentTag, type: 'Flat', default_monthly_amount: 2200 })
+    .select('id')
+    .single();
+  if (paidCurrentHouseError) {
+    console.error('setup failed: could not create the paid-current throwaway house', paidCurrentHouseError.message);
+  }
+  const { error: paidCurrentPeriodError } = await supabaseAdmin.from('billing_periods').insert({
+    society_id: SOCIETY_ID,
+    house_id: paidCurrentHouse.id,
+    period_month: currentPeriodMonth,
+    base_amount: 2200,
+    amount_due: 2200,
+    status: 'Closed',
+  });
+  if (paidCurrentPeriodError) {
+    console.error("setup failed: could not close the paid-current throwaway house's period", paidCurrentPeriodError.message);
+  }
+  const paidCurrentUtr = `TESTGRIDCURTXN${Date.now()}`;
+  const { error: paidCurrentTxnError } = await supabaseAdmin.from('transactions').insert({
+    society_id: SOCIETY_ID,
+    house_id: paidCurrentHouse.id,
+    submitted_by: '00000001-0000-0000-0000-000000000001',
+    amount: 2200,
+    utr_number: paidCurrentUtr,
+    payment_status: 'Success',
+    processing_status: 'Verified',
+    transaction_type: 'Maintenance',
+    direction: 'Cr',
+    payment_mode: 'UPI',
+    verified_by: '00000001-0000-0000-0000-000000000001',
+    verified_at: now.toISOString(),
+  });
+  if (paidCurrentTxnError) {
+    console.error(
+      "setup failed: could not create the paid-current throwaway house's Verified transaction",
+      paidCurrentTxnError.message
+    );
+  }
+
   // --- Unauthenticated is rejected ---
   check(
     'unauthenticated GET is rejected (401)',
@@ -221,13 +274,21 @@ async function main() {
   const houses = gridResponse.body.houses || [];
 
   check(
-    'currentMonthPaidCount + currentMonthPendingCount account for every house exactly once',
-    typeof gridResponse.body.currentMonthPaidCount === 'number' &&
-      typeof gridResponse.body.currentMonthPendingCount === 'number' &&
-      gridResponse.body.currentMonthPaidCount + gridResponse.body.currentMonthPendingCount === houses.length,
+    'paidCurrentCount + paidOldCount + paidAdvanceCount + unpaidCount account for every house exactly once',
+    typeof gridResponse.body.paidCurrentCount === 'number' &&
+      typeof gridResponse.body.paidOldCount === 'number' &&
+      typeof gridResponse.body.paidAdvanceCount === 'number' &&
+      typeof gridResponse.body.unpaidCount === 'number' &&
+      gridResponse.body.paidCurrentCount +
+        gridResponse.body.paidOldCount +
+        gridResponse.body.paidAdvanceCount +
+        gridResponse.body.unpaidCount ===
+        houses.length,
     {
-      currentMonthPaidCount: gridResponse.body.currentMonthPaidCount,
-      currentMonthPendingCount: gridResponse.body.currentMonthPendingCount,
+      paidCurrentCount: gridResponse.body.paidCurrentCount,
+      paidOldCount: gridResponse.body.paidOldCount,
+      paidAdvanceCount: gridResponse.body.paidAdvanceCount,
+      unpaidCount: gridResponse.body.unpaidCount,
       housesLength: houses.length,
     }
   );
@@ -275,35 +336,51 @@ async function main() {
   const paidEntry = findHouse(houses, paidHouse.id);
   check(
     'a fully-paid house (unlike the pendency-report) IS included here, with overdueMonths=0, currentMonthDue=false, bucket=green, ' +
-      'currentMonthSettled=true (its current-month period is Closed) but paidThisMonth=false (no transaction actually happened now)',
+      'currentMonthSettled=true but paidThisMonth=false (no transaction actually happened now) -> paymentStatus=paidAdvance',
     !!paidEntry &&
       paidEntry.overdueMonths === 0 &&
       paidEntry.currentMonthDue === false &&
       paidEntry.bucket === 'green' &&
       paidEntry.currentMonthSettled === true &&
-      paidEntry.paidThisMonth === false,
+      paidEntry.paidThisMonth === false &&
+      paidEntry.paymentStatus === 'paidAdvance',
     paidEntry
   );
 
   const neverBilledEntry = findHouse(houses, neverBilledHouse.id);
   check(
     'a never-billed house (zero billing periods ever) still appears, defaulted to overdueMonths=0/currentMonthDue=false/bucket=green, ' +
-      'but currentMonthSettled=false (counts as Pending, not Paid, per the 2-bucket decision) and paidThisMonth=false',
+      'currentMonthSettled=false and paidThisMonth=false -> paymentStatus=unpaid',
     !!neverBilledEntry &&
       neverBilledEntry.overdueMonths === 0 &&
       neverBilledEntry.currentMonthDue === false &&
       neverBilledEntry.bucket === 'green' &&
       neverBilledEntry.currentMonthSettled === false &&
-      neverBilledEntry.paidThisMonth === false,
+      neverBilledEntry.paidThisMonth === false &&
+      neverBilledEntry.paymentStatus === 'unpaid',
     neverBilledEntry
   );
 
   const paidThisMonthEntry = findHouse(houses, paidThisMonthHouse.id);
   check(
     'a house with a Verified Maintenance transaction this calendar month gets paidThisMonth=true, ' +
-      'even with no billing_period behind it at all (currentMonthSettled stays false)',
-    !!paidThisMonthEntry && paidThisMonthEntry.paidThisMonth === true && paidThisMonthEntry.currentMonthSettled === false,
+      'even with no billing_period behind it at all (currentMonthSettled stays false) -> paymentStatus=paidOld',
+    !!paidThisMonthEntry &&
+      paidThisMonthEntry.paidThisMonth === true &&
+      paidThisMonthEntry.currentMonthSettled === false &&
+      paidThisMonthEntry.paymentStatus === 'paidOld',
     paidThisMonthEntry
+  );
+
+  const paidCurrentEntry = findHouse(houses, paidCurrentHouse.id);
+  check(
+    'a house with BOTH a Closed current-month period AND a Verified transaction this calendar month ' +
+      'gets currentMonthSettled=true and paidThisMonth=true -> paymentStatus=paidCurrent (the "clean" case)',
+    !!paidCurrentEntry &&
+      paidCurrentEntry.currentMonthSettled === true &&
+      paidCurrentEntry.paidThisMonth === true &&
+      paidCurrentEntry.paymentStatus === 'paidCurrent',
+    paidCurrentEntry
   );
 
   check(
@@ -350,6 +427,7 @@ async function main() {
   // RESTRICT if ever allocated - see test-billing-history.js's own note),
   // then deleting each throwaway house cascades to its billing_periods.
   await supabaseAdmin.from('transactions').delete().eq('utr_number', paidThisMonthUtr);
+  await supabaseAdmin.from('transactions').delete().eq('utr_number', paidCurrentUtr);
   if (paidHouse?.id) {
     await supabaseAdmin.from('houses').delete().eq('id', paidHouse.id);
   }
@@ -358,6 +436,9 @@ async function main() {
   }
   if (paidThisMonthHouse?.id) {
     await supabaseAdmin.from('houses').delete().eq('id', paidThisMonthHouse.id);
+  }
+  if (paidCurrentHouse?.id) {
+    await supabaseAdmin.from('houses').delete().eq('id', paidCurrentHouse.id);
   }
   for (const authUserId of createdAuthUserIds) {
     await supabaseAdmin.auth.admin.deleteUser(authUserId);

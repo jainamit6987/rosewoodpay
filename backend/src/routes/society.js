@@ -660,6 +660,11 @@ function compareHouseNumbers(a, b) {
 // rule above treats that one differently depending on the day of the
 // month, which the pendency-report's own overdueMonths count (periods
 // strictly BEFORE the target month) never needed to distinguish.
+//
+// Also computes a 4-way `paymentStatus` per house (paidCurrent/paidOld/
+// paidAdvance/unpaid - see its own comment further down) plus matching
+// society-wide counts, powering the Houses screen's per-tile tick/star/
+// hollow-tick indicator and its 4-category summary table.
 router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
   const supabase = req.supabase;
   const { id: societyId } = req.params;
@@ -693,11 +698,11 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
   // Current month's own billing_period status (or its absence entirely,
   // meaning never billed) - separate from the Open-periods-only query
   // above, which can never distinguish "already Closed" from "no period
-  // row at all" (both are simply missing from that result). Needed for
-  // the "Paid / Pending" legend count below: the user explicitly decided
-  // (2026-10-13) a house with no period generated yet for this month
-  // should still count as Pending, not Paid - this is the only query that
-  // can tell the two apart.
+  // row at all" (both are simply missing from that result). Feeds
+  // currentMonthSettled below, one half of the 4-way paymentStatus (a
+  // house with no period generated yet for this month settles to
+  // currentMonthSettled=false, same as a house with an Open one - this
+  // is the only query that can tell "never billed" apart from "Open").
   const currentMonthStatusByHouseId = new Map();
   // Houses with at least one Verified Maintenance transaction landing in
   // the current calendar month (by verified_at, not the optional
@@ -768,20 +773,50 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
     }
   }
 
-  let currentMonthPaidCount = 0;
-  let currentMonthPendingCount = 0;
+  // Four-way payment-status category for the Houses screen's per-tile
+  // indicator + summary table - replaces the old 2-bucket Paid/Pending
+  // legend (discussed directly with the user 2026-10-24: 2 buckets
+  // confused an advance-payer, who counted as "Paid" but got no tick,
+  // and a resident who'd just cleared old arrears, who got a tick but
+  // didn't count as "Paid"). Derived from the exact same two booleans
+  // this endpoint already computed separately - just combined into one
+  // 2x2 instead of shipping them as two independent flags for every
+  // screen to reinterpret itself:
+  //   paidCurrent - settled AND a transaction actually happened this
+  //     month (the "clean" case - solid tick)
+  //   paidAdvance - settled, but NOT from anything happening this month
+  //     (paid ahead of time in an earlier month - star)
+  //   paidOld     - a transaction happened this month, but this month's
+  //     OWN period is still open (cleared old arrears - possibly with
+  //     extra left over - but hasn't covered this month's own bill yet -
+  //     hollow tick)
+  //   unpaid      - neither (no indicator)
+  let paidCurrentCount = 0;
+  let paidOldCount = 0;
+  let paidAdvanceCount = 0;
+  let unpaidCount = 0;
 
   const result = (houses || []).map((house) => {
     const due = dueByHouseId.get(house.id) || { overdueMonths: 0, currentMonthDue: false };
     const periodsDue = due.overdueMonths + (due.currentMonthDue ? 1 : 0);
-    // "Paid" for the legend means this month's own period is actually
-    // settled (Closed or Waived) - Open, or no period row at all (never
-    // billed), both count as Pending, per the user's explicit 2-bucket
-    // decision above.
     const currentMonthStatus = currentMonthStatusByHouseId.get(house.id) || null;
     const currentMonthSettled = currentMonthStatus === 'Closed' || currentMonthStatus === 'Waived';
-    if (currentMonthSettled) currentMonthPaidCount += 1;
-    else currentMonthPendingCount += 1;
+    const paidThisMonth = paidThisMonthHouseIds.has(house.id);
+
+    let paymentStatus;
+    if (currentMonthSettled && paidThisMonth) {
+      paymentStatus = 'paidCurrent';
+      paidCurrentCount += 1;
+    } else if (currentMonthSettled && !paidThisMonth) {
+      paymentStatus = 'paidAdvance';
+      paidAdvanceCount += 1;
+    } else if (!currentMonthSettled && paidThisMonth) {
+      paymentStatus = 'paidOld';
+      paidOldCount += 1;
+    } else {
+      paymentStatus = 'unpaid';
+      unpaidCount += 1;
+    }
 
     return {
       id: house.id,
@@ -792,7 +827,8 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
       currentMonthDue: due.currentMonthDue,
       bucket: duesBucket(periodsDue),
       currentMonthSettled,
-      paidThisMonth: paidThisMonthHouseIds.has(house.id),
+      paidThisMonth,
+      paymentStatus,
     };
   });
 
@@ -801,8 +837,10 @@ router.get('/:id/houses-dues-grid', authenticate, async (req, res) => {
   res.json({
     asOfDate: toDateOnly(now),
     currentMonth: currentMonthDateOnly,
-    currentMonthPaidCount,
-    currentMonthPendingCount,
+    paidCurrentCount,
+    paidOldCount,
+    paidAdvanceCount,
+    unpaidCount,
     houses: result,
   });
 });
